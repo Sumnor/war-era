@@ -39,6 +39,7 @@ class WarEraMonitor:
             "itemTrading.getPrices",
             "itemTrading.getRecent",
             "itemTrading.getOrders",
+            "itemTrading.getHistory",
             "market.getPrices",
             "market.getOrders",
             "market.getRecent",
@@ -47,6 +48,10 @@ class WarEraMonitor:
             "bank.getInterestRates",
             "trade.getActive",
             "trade.getRecent",
+            "economy.getStats",
+            "economy.getTopProducers",
+            "economy.getTopTraders",
+            "economy.getGDP",
             
             # Nations
             "nation.getStats",
@@ -59,6 +64,30 @@ class WarEraMonitor:
             "nation.getChanges",
             "nation.getMilitary",
             "nation.getEconomy",
+            "nation.getProduction",
+            "nation.getRevenue",
+            "nation.getInfrastructure",
+            "nation.getLand",
+            "nation.getTechnology",
+            
+            # Rankings/Leaderboards
+            "rankings.getTopNations",
+            "rankings.getTopAlliances",
+            "rankings.getTopMilitary",
+            "rankings.getTopEconomy",
+            "rankings.getTopProduction",
+            "rankings.getTopRevenue",
+            "rankings.getTopGDP",
+            "rankings.getTopScore",
+            "rankings.getTopLand",
+            "rankings.getTopInfrastructure",
+            "leaderboard.getNations",
+            "leaderboard.getAlliances",
+            "leaderboard.getMilitary",
+            "leaderboard.getEconomy",
+            "stats.getTopProducers",
+            "stats.getTopNations",
+            "stats.getGlobal",
             
             # War
             "war.getActive",
@@ -67,6 +96,8 @@ class WarEraMonitor:
             "war.getDefenses",
             "war.getHistory",
             "war.getStats",
+            "war.getTopAttackers",
+            "war.getTopDefenders",
             
             # Alliance
             "alliance.getWars",
@@ -75,11 +106,21 @@ class WarEraMonitor:
             "alliance.getRecent",
             "alliance.getTreaties",
             "alliance.getActivity",
+            "alliance.getRankings",
+            "alliance.getTopAlliances",
             
             # User/Player
             "user.getStats",
             "user.getActivity",
             "user.getRecent",
+            
+            # Global/World
+            "world.getStats",
+            "world.getActivity",
+            "world.getProduction",
+            "world.getResources",
+            "global.getStats",
+            "global.getProduction",
         ]
     
     def fetch_endpoint(self, endpoint: str, params: Optional[Dict] = None) -> Optional[Dict]:
@@ -87,7 +128,16 @@ class WarEraMonitor:
             url = f"{self.base_url}/{endpoint}"
             response = requests.get(url, params=params, timeout=10)
             response.raise_for_status()
-            return response.json()
+            data = response.json()
+            
+            # tRPC often wraps data in a result object
+            if isinstance(data, dict):
+                if 'result' in data and 'data' in data['result']:
+                    return data['result']['data']
+                elif 'result' in data:
+                    return data['result']
+            
+            return data
         except requests.exceptions.RequestException as e:
             # Only log non-404 errors
             if hasattr(e, 'response') and e.response is not None:
@@ -183,6 +233,10 @@ class WarEraMonitor:
             return "ECONOMY"
         elif any(x in endpoint_lower for x in ['build', 'military', 'soldier', 'tank']):
             return "BUILD_CHANGE"
+        elif any(x in endpoint_lower for x in ['ranking', 'leaderboard', 'top', 'stats']):
+            return "RANKINGS"
+        elif any(x in endpoint_lower for x in ['production', 'producer', 'revenue', 'gdp']):
+            return "PRODUCTION"
         elif 'alliance' in endpoint_lower:
             return "ALLIANCE"
         elif 'nation' in endpoint_lower:
@@ -263,7 +317,7 @@ class WarEraMonitor:
 # Discord Bot Setup - FIXED PREFIX
 intents = discord.Intents.default()
 intents.message_content = True
-bot = commands.Bot(command_prefix="!", intents=intents, help_command=None)  # Changed from '!war ' to '!'
+bot = commands.Bot(command_prefix="!", intents=intents, help_command=None)
 
 monitor = WarEraMonitor()
 alert_channel_id = None
@@ -435,6 +489,8 @@ async def status(ctx):
 @bot.command()
 async def endpoints(ctx):
     """Show all active endpoints being monitored"""
+    await ctx.send("🔍 Scanning all endpoints... this may take a moment")
+    
     active = monitor.get_active_endpoints()
     
     if not active:
@@ -451,14 +507,53 @@ async def endpoints(ctx):
     
     embed = discord.Embed(
         title=f"📡 Active Endpoints ({len(active)})",
+        description="These endpoints are responding and being monitored",
         color=discord.Color.blue()
     )
     
     for prefix, endpoints in sorted(by_type.items()):
-        endpoint_list = "\n".join([f"• {e}" for e in endpoints[:10]])
+        endpoint_list = "\n".join([f"• `{e}`" for e in endpoints[:10]])
         if len(endpoints) > 10:
             endpoint_list += f"\n... and {len(endpoints) - 10} more"
-        embed.add_field(name=f"{prefix.upper()}", value=endpoint_list, inline=False)
+        embed.add_field(name=f"📂 {prefix.upper()}", value=endpoint_list, inline=False)
+    
+    await ctx.send(embed=embed)
+
+
+@bot.command()
+async def testapi(ctx, endpoint: str = None):
+    """Test a specific API endpoint. Usage: !testapi itemTrading.getPrices"""
+    if endpoint is None:
+        await ctx.send("⚠️ Usage: `!testapi <endpoint>`\nExample: `!testapi itemTrading.getPrices`")
+        return
+    
+    await ctx.send(f"🔍 Testing endpoint: `{endpoint}`")
+    
+    data = monitor.fetch_endpoint(endpoint)
+    
+    if data is None:
+        await ctx.send(f"❌ Endpoint `{endpoint}` returned no data or errored")
+        return
+    
+    # Show data structure
+    embed = discord.Embed(
+        title=f"✅ Endpoint Active: {endpoint}",
+        color=discord.Color.green()
+    )
+    
+    data_type = type(data).__name__
+    embed.add_field(name="Data Type", value=data_type, inline=True)
+    
+    if isinstance(data, list):
+        embed.add_field(name="Item Count", value=str(len(data)), inline=True)
+        if data:
+            embed.add_field(name="Sample Item", value=f"```json\n{json.dumps(data[0], indent=2)[:500]}```", inline=False)
+    elif isinstance(data, dict):
+        embed.add_field(name="Keys", value=str(len(data.keys())), inline=True)
+        embed.add_field(name="Key Names", value=", ".join(list(data.keys())[:10]), inline=False)
+        embed.add_field(name="Sample Data", value=f"```json\n{json.dumps(data, indent=2)[:500]}```", inline=False)
+    else:
+        embed.add_field(name="Raw Data", value=f"```{str(data)[:500]}```", inline=False)
     
     await ctx.send(embed=embed)
 
@@ -532,6 +627,7 @@ async def help(ctx):
         ("!scan", "Run manual scan immediately"),
         ("!status", "Show bot status and statistics"),
         ("!endpoints", "List all active endpoints being monitored"),
+        ("!testapi <endpoint>", "Test a specific endpoint and see its data"),
         ("!threshold <setting> <value>", "Set alert thresholds (Admin)"),
         ("!interval <minutes>", "Change scan interval (Admin)"),
         ("!start", "Start monitoring (Admin)"),
