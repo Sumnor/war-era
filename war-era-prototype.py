@@ -521,7 +521,96 @@ async def endpoints(ctx):
 
 
 @bot.command()
-async def testapi(ctx, endpoint: str = None):
+async def top(ctx, category: str = "nations"):
+    """Show top nations/producers. Usage: !top nations, !top production, !top military, !top economy"""
+    await ctx.send(f"🔍 Fetching top {category}...")
+    
+    # Map category to endpoints
+    endpoint_map = {
+        'nations': ['rankings.getTopNations', 'leaderboard.getNations', 'stats.getTopNations'],
+        'production': ['economy.getTopProducers', 'stats.getTopProducers', 'rankings.getTopProduction'],
+        'military': ['rankings.getTopMilitary', 'war.getTopAttackers'],
+        'economy': ['rankings.getTopEconomy', 'economy.getTopTraders', 'rankings.getTopGDP'],
+        'alliances': ['rankings.getTopAlliances', 'leaderboard.getAlliances', 'alliance.getTopAlliances'],
+        'revenue': ['rankings.getTopRevenue'],
+        'gdp': ['rankings.getTopGDP'],
+        'attackers': ['war.getTopAttackers'],
+        'defenders': ['war.getTopDefenders'],
+    }
+    
+    endpoints = endpoint_map.get(category.lower(), endpoint_map['nations'])
+    
+    data = None
+    used_endpoint = None
+    
+    # Try each endpoint until one works
+    for endpoint in endpoints:
+        data = monitor.fetch_endpoint(endpoint)
+        if data is not None:
+            used_endpoint = endpoint
+            break
+    
+    if data is None:
+        await ctx.send(f"❌ Could not fetch data for category: {category}\nTried endpoints: {', '.join(endpoints)}")
+        return
+    
+    embed = discord.Embed(
+        title=f"🏆 Top {category.title()}",
+        description=f"Data from: `{used_endpoint}`",
+        color=discord.Color.gold()
+    )
+    
+    # Format the data
+    if isinstance(data, list):
+        # List of items
+        items_text = ""
+        for i, item in enumerate(data[:10], 1):
+            if isinstance(item, dict):
+                # Try to extract name and relevant stat
+                name = item.get('name', item.get('nation', item.get('id', 'Unknown')))
+                
+                # Find the most relevant stat
+                stat_keys = ['score', 'production', 'gdp', 'revenue', 'military', 'attacks', 'value']
+                stat_value = None
+                stat_name = None
+                
+                for key in stat_keys:
+                    if key in item:
+                        stat_value = item[key]
+                        stat_name = key
+                        break
+                
+                if stat_value is not None:
+                    items_text += f"{i}. **{name}** - {stat_name.title()}: {stat_value:,}\n"
+                else:
+                    items_text += f"{i}. **{name}**\n"
+            else:
+                items_text += f"{i}. {item}\n"
+        
+        if items_text:
+            embed.add_field(name="Rankings", value=items_text, inline=False)
+        else:
+            embed.add_field(name="Data", value=f"```json\n{json.dumps(data[:3], indent=2)[:500]}```", inline=False)
+    
+    elif isinstance(data, dict):
+        # Dictionary of items
+        items_text = ""
+        for i, (key, value) in enumerate(list(data.items())[:10], 1):
+            if isinstance(value, (int, float)):
+                items_text += f"{i}. **{key}**: {value:,}\n"
+            else:
+                items_text += f"{i}. **{key}**: {value}\n"
+        
+        if items_text:
+            embed.add_field(name="Rankings", value=items_text, inline=False)
+    
+    await ctx.send(embed=embed)
+
+
+@bot.command()
+async def production(ctx):
+    """Show top producing nations"""
+    await top(ctx, "production")
     """Test a specific API endpoint. Usage: !testapi itemTrading.getPrices"""
     if endpoint is None:
         await ctx.send("⚠️ Usage: `!testapi <endpoint>`\nExample: `!testapi itemTrading.getPrices`")
@@ -628,6 +717,8 @@ async def help(ctx):
         ("!status", "Show bot status and statistics"),
         ("!endpoints", "List all active endpoints being monitored"),
         ("!testapi <endpoint>", "Test a specific endpoint and see its data"),
+        ("!top <category>", "Show rankings: nations, production, military, economy, alliances"),
+        ("!production", "Show top producing nations (shortcut)"),
         ("!threshold <setting> <value>", "Set alert thresholds (Admin)"),
         ("!interval <minutes>", "Change scan interval (Admin)"),
         ("!start", "Start monitoring (Admin)"),
