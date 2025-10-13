@@ -263,7 +263,7 @@ class WarEraMonitor:
 # Discord Bot Setup - FIXED PREFIX
 intents = discord.Intents.default()
 intents.message_content = True
-bot = commands.Bot(command_prefix='!', intents=intents)  # Changed from '!war ' to '!'
+bot = commands.Bot(command_prefix="!", intents=intents, help_command=None)  # Changed from '!war ' to '!'
 
 monitor = WarEraMonitor()
 alert_channel_id = None
