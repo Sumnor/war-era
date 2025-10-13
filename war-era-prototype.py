@@ -29,8 +29,58 @@ class WarEraMonitor:
         self.thresholds = {
             'price_change_percent': 20,
             'build_change_threshold': 15,
+            'stat_change_threshold': 10,
             'large_trade_threshold': 1000000,
         }
+        
+        # All possible endpoints to monitor
+        self.endpoints = [
+            # Trading & Economy
+            "itemTrading.getPrices",
+            "itemTrading.getRecent",
+            "itemTrading.getOrders",
+            "market.getPrices",
+            "market.getOrders",
+            "market.getRecent",
+            "market.getTrades",
+            "bank.getLoans",
+            "bank.getInterestRates",
+            "trade.getActive",
+            "trade.getRecent",
+            
+            # Nations
+            "nation.getStats",
+            "nation.getBuilds",
+            "nation.getRecent",
+            "nation.getAttacks",
+            "nation.getDefenses",
+            "nation.getResources",
+            "nation.getActivity",
+            "nation.getChanges",
+            "nation.getMilitary",
+            "nation.getEconomy",
+            
+            # War
+            "war.getActive",
+            "war.getRecent",
+            "war.getAttacks",
+            "war.getDefenses",
+            "war.getHistory",
+            "war.getStats",
+            
+            # Alliance
+            "alliance.getWars",
+            "alliance.getMembers",
+            "alliance.getStats",
+            "alliance.getRecent",
+            "alliance.getTreaties",
+            "alliance.getActivity",
+            
+            # User/Player
+            "user.getStats",
+            "user.getActivity",
+            "user.getRecent",
+        ]
     
     def fetch_endpoint(self, endpoint: str, params: Optional[Dict] = None) -> Optional[Dict]:
         try:
@@ -39,7 +89,10 @@ class WarEraMonitor:
             response.raise_for_status()
             return response.json()
         except requests.exceptions.RequestException as e:
-            print(f"Error fetching {endpoint}: {e}")
+            # Only log non-404 errors
+            if hasattr(e, 'response') and e.response is not None:
+                if e.response.status_code != 404:
+                    print(f"Error fetching {endpoint}: {e}")
             return None
     
     def add_alert(self, level: AlertLevel, category: str, message: str, data: Dict = None):
@@ -53,158 +106,167 @@ class WarEraMonitor:
         self.alerts.append(alert)
         return alert
     
-    def monitor_item_prices(self) -> List[Alert]:
-        new_alerts = []
-        data = self.fetch_endpoint("itemTrading.getPrices")
-        
-        if not data:
-            return new_alerts
-        
-        if 'itemTrading.getPrices' in self.previous_data:
-            old_data = self.previous_data['itemTrading.getPrices']
-            new_alerts.extend(self.detect_price_changes(old_data, data))
-        
-        self.previous_data['itemTrading.getPrices'] = data
-        return new_alerts
-    
-    def detect_price_changes(self, old_data: Dict, new_data: Dict) -> List[Alert]:
+    def detect_generic_changes(self, endpoint: str, old_data, new_data) -> List[Alert]:
+        """Generic change detection for any endpoint"""
         alerts = []
+        
         try:
-            if isinstance(new_data, dict) and isinstance(old_data, dict):
-                for item_id, new_price in new_data.items():
-                    if item_id in old_data:
-                        old_price = old_data[item_id]
-                        if old_price > 0:
-                            change_percent = ((new_price - old_price) / old_price) * 100
+            # Handle list data (new items added)
+            if isinstance(old_data, list) and isinstance(new_data, list):
+                old_count = len(old_data)
+                new_count = len(new_data)
+                
+                if new_count > old_count:
+                    diff = new_count - old_count
+                    level = AlertLevel.CRITICAL if diff > 5 or 'war' in endpoint.lower() or 'attack' in endpoint.lower() else AlertLevel.WARNING
+                    
+                    alert = self.add_alert(
+                        level,
+                        self._categorize_endpoint(endpoint),
+                        f"New activity in {endpoint}: +{diff} entries",
+                        {
+                            'endpoint': endpoint,
+                            'old_count': old_count,
+                            'new_count': new_count,
+                            'increase': diff
+                        }
+                    )
+                    alerts.append(alert)
+            
+            # Handle dict data (value changes)
+            elif isinstance(old_data, dict) and isinstance(new_data, dict):
+                for key, new_val in new_data.items():
+                    if key in old_data:
+                        old_val = old_data[key]
+                        
+                        # Check numeric changes
+                        if isinstance(old_val, (int, float)) and isinstance(new_val, (int, float)) and old_val != 0:
+                            change_percent = ((new_val - old_val) / abs(old_val)) * 100
                             
-                            if abs(change_percent) >= self.thresholds['price_change_percent']:
-                                level = AlertLevel.WARNING if abs(change_percent) < 50 else AlertLevel.CRITICAL
+                            # Different thresholds for different types
+                            threshold = self._get_threshold_for_key(key, endpoint)
+                            
+                            if abs(change_percent) >= threshold:
+                                level = self._determine_alert_level(change_percent, key, endpoint)
+                                
                                 alert = self.add_alert(
                                     level,
-                                    "PRICE_CHANGE",
-                                    f"Item {item_id} price changed by {change_percent:.1f}%",
+                                    self._categorize_endpoint(endpoint),
+                                    f"{endpoint}.{key}: {change_percent:+.1f}% change",
                                     {
-                                        'item_id': item_id,
-                                        'old_price': old_price,
-                                        'new_price': new_price,
+                                        'endpoint': endpoint,
+                                        'key': key,
+                                        'old_value': old_val,
+                                        'new_value': new_val,
                                         'change_percent': change_percent
                                     }
                                 )
                                 alerts.append(alert)
-        except Exception as e:
-            print(f"Error detecting price changes: {e}")
-        return alerts
-    
-    def monitor_nation_builds(self, nation_id: Optional[str] = None) -> List[Alert]:
-        new_alerts = []
-        endpoints = ["nation.getStats", "nation.getBuilds", "nation.getRecent"]
+                        
+                        # Check nested dicts
+                        elif isinstance(old_val, dict) and isinstance(new_val, dict):
+                            nested_alerts = self.detect_generic_changes(f"{endpoint}.{key}", old_val, new_val)
+                            alerts.extend(nested_alerts)
         
-        for endpoint in endpoints:
-            params = {'nationId': nation_id} if nation_id else None
-            data = self.fetch_endpoint(endpoint, params)
-            
-            if data:
-                cache_key = f"{endpoint}_{nation_id}" if nation_id else endpoint
-                
-                if cache_key in self.previous_data:
-                    new_alerts.extend(self.detect_build_changes(cache_key, self.previous_data[cache_key], data))
-                
-                self.previous_data[cache_key] = data
-        return new_alerts
-    
-    def detect_build_changes(self, cache_key: str, old_data: Dict, new_data: Dict) -> List[Alert]:
-        alerts = []
-        try:
-            if isinstance(new_data, dict) and isinstance(old_data, dict):
-                war_indicators = ['military', 'defense', 'attack', 'soldiers', 'tanks']
-                econ_indicators = ['farms', 'factories', 'banks', 'commerce']
-                
-                for key in war_indicators:
-                    if key in new_data and key in old_data:
-                        if new_data[key] > old_data[key] * 1.15:
-                            alert = self.add_alert(
-                                AlertLevel.WARNING,
-                                "WAR_BUILD",
-                                f"Nation increasing war capability: {key} +{((new_data[key]/old_data[key])-1)*100:.1f}%",
-                                {
-                                    'cache_key': cache_key,
-                                    'stat': key,
-                                    'old_value': old_data[key],
-                                    'new_value': new_data[key]
-                                }
-                            )
-                            alerts.append(alert)
-                
-                for key in econ_indicators:
-                    if key in new_data and key in old_data:
-                        if new_data[key] < old_data[key] * 0.85:
-                            alert = self.add_alert(
-                                AlertLevel.INFO,
-                                "ECON_REDUCTION",
-                                f"Nation reducing econ: {key} -{((1-new_data[key]/old_data[key]))*100:.1f}%",
-                                {
-                                    'cache_key': cache_key,
-                                    'stat': key,
-                                    'old_value': old_data[key],
-                                    'new_value': new_data[key]
-                                }
-                            )
-                            alerts.append(alert)
         except Exception as e:
-            print(f"Error detecting build changes: {e}")
-        return alerts
-    
-    def monitor_war_activity(self) -> List[Alert]:
-        new_alerts = []
-        endpoints = ["war.getActive", "war.getRecent", "alliance.getWars", "nation.getAttacks"]
+            print(f"Error detecting changes in {endpoint}: {e}")
         
-        for endpoint in endpoints:
-            data = self.fetch_endpoint(endpoint)
-            
-            if data:
-                if endpoint in self.previous_data:
-                    new_alerts.extend(self.detect_war_changes(endpoint, self.previous_data[endpoint], data))
-                
-                self.previous_data[endpoint] = data
-        return new_alerts
-    
-    def detect_war_changes(self, endpoint: str, old_data: Dict, new_data: Dict) -> List[Alert]:
-        alerts = []
-        try:
-            old_count = len(old_data) if isinstance(old_data, list) else 0
-            new_count = len(new_data) if isinstance(new_data, list) else 0
-            
-            if new_count > old_count:
-                alert = self.add_alert(
-                    AlertLevel.CRITICAL,
-                    "WAR_ACTIVITY",
-                    f"New war activity: {new_count - old_count} new entries in {endpoint}",
-                    {
-                        'endpoint': endpoint,
-                        'old_count': old_count,
-                        'new_count': new_count
-                    }
-                )
-                alerts.append(alert)
-        except Exception as e:
-            print(f"Error detecting war changes: {e}")
         return alerts
+    
+    def _categorize_endpoint(self, endpoint: str) -> str:
+        """Categorize endpoint for alert grouping"""
+        endpoint_lower = endpoint.lower()
+        
+        if any(x in endpoint_lower for x in ['war', 'attack', 'defense']):
+            return "WAR_ACTIVITY"
+        elif any(x in endpoint_lower for x in ['price', 'trade', 'market', 'bank', 'loan']):
+            return "ECONOMY"
+        elif any(x in endpoint_lower for x in ['build', 'military', 'soldier', 'tank']):
+            return "BUILD_CHANGE"
+        elif 'alliance' in endpoint_lower:
+            return "ALLIANCE"
+        elif 'nation' in endpoint_lower:
+            return "NATION"
+        else:
+            return "GENERAL"
+    
+    def _get_threshold_for_key(self, key: str, endpoint: str) -> float:
+        """Get appropriate threshold based on key name"""
+        key_lower = key.lower()
+        
+        # Price changes - more sensitive
+        if 'price' in key_lower or 'cost' in key_lower:
+            return self.thresholds.get('price_change_percent', 20)
+        
+        # Military/war - very sensitive
+        if any(x in key_lower for x in ['military', 'attack', 'defense', 'soldier', 'tank', 'weapon']):
+            return self.thresholds.get('build_change_threshold', 15)
+        
+        # Economy - moderate sensitivity
+        if any(x in key_lower for x in ['bank', 'factory', 'farm', 'commerce', 'money', 'resource']):
+            return self.thresholds.get('stat_change_threshold', 10)
+        
+        # Default
+        return 25
+    
+    def _determine_alert_level(self, change_percent: float, key: str, endpoint: str) -> AlertLevel:
+        """Determine alert level based on change magnitude and context"""
+        key_lower = key.lower()
+        endpoint_lower = endpoint.lower()
+        
+        # Critical thresholds
+        if abs(change_percent) > 100:
+            return AlertLevel.CRITICAL
+        
+        # War-related changes are more critical
+        if any(x in key_lower or x in endpoint_lower for x in ['war', 'attack', 'military', 'defense']):
+            return AlertLevel.CRITICAL if abs(change_percent) > 30 else AlertLevel.WARNING
+        
+        # Price changes
+        if 'price' in key_lower:
+            return AlertLevel.CRITICAL if abs(change_percent) > 50 else AlertLevel.WARNING
+        
+        # Default
+        if abs(change_percent) > 50:
+            return AlertLevel.WARNING
+        
+        return AlertLevel.INFO
     
     def run_full_scan(self) -> List[Alert]:
-        all_alerts = []
-        all_alerts.extend(self.monitor_item_prices())
-        all_alerts.extend(self.monitor_nation_builds())
-        all_alerts.extend(self.monitor_war_activity())
-        return all_alerts
+        """Scan all endpoints and detect changes"""
+        new_alerts = []
+        
+        for endpoint in self.endpoints:
+            data = self.fetch_endpoint(endpoint)
+            
+            if data is not None:
+                # Compare with previous data if exists
+                if endpoint in self.previous_data:
+                    alerts = self.detect_generic_changes(endpoint, self.previous_data[endpoint], data)
+                    new_alerts.extend(alerts)
+                
+                # Store current data
+                self.previous_data[endpoint] = data
+        
+        return new_alerts
+    
+    def get_active_endpoints(self) -> List[str]:
+        """Discover which endpoints are actually available"""
+        active = []
+        for endpoint in self.endpoints:
+            data = self.fetch_endpoint(endpoint)
+            if data is not None:
+                active.append(endpoint)
+        return active
 
 
-# Discord Bot
+# Discord Bot Setup - FIXED PREFIX
 intents = discord.Intents.default()
 intents.message_content = True
-bot = commands.Bot(command_prefix="!", intents=intents, help_command=None)
+bot = commands.Bot(command_prefix='!', intents=intents)  # Changed from '!war ' to '!'
 
 monitor = WarEraMonitor()
-alert_channel_id = None  # Set this via !war setchannel
+alert_channel_id = None
 
 
 def create_alert_embed(alert: Alert) -> discord.Embed:
@@ -223,9 +285,14 @@ def create_alert_embed(alert: Alert) -> discord.Embed:
     )
     
     if alert.data:
+        # Limit fields to prevent embed size issues
+        count = 0
         for key, value in alert.data.items():
-            if isinstance(value, (int, float, str)):
+            if count >= 10:  # Discord embed field limit
+                break
+            if isinstance(value, (int, float, str)) and len(str(value)) < 1024:
                 embed.add_field(name=key.replace('_', ' ').title(), value=str(value), inline=True)
+                count += 1
     
     return embed
 
@@ -234,6 +301,12 @@ def create_alert_embed(alert: Alert) -> discord.Embed:
 async def on_ready():
     print(f'{bot.user} has connected to Discord!')
     print(f'Bot is in {len(bot.guilds)} guilds')
+    
+    # Discover active endpoints
+    print('Discovering active endpoints...')
+    active = monitor.get_active_endpoints()
+    print(f'Found {len(active)} active endpoints')
+    
     if not monitor_task.is_running():
         monitor_task.start()
         print('Monitoring task started')
@@ -249,26 +322,47 @@ async def monitor_task():
     if channel is None:
         return
     
-    alerts = monitor.run_full_scan()
+    try:
+        alerts = monitor.run_full_scan()
+        
+        if alerts:
+            # Group alerts by category
+            by_category = {}
+            for alert in alerts:
+                if alert.category not in by_category:
+                    by_category[alert.category] = []
+                by_category[alert.category].append(alert)
+            
+            # Send summary
+            summary = f"**🚨 War Room Scan - {len(alerts)} alerts**\n"
+            for category, cat_alerts in by_category.items():
+                summary += f"• {category}: {len(cat_alerts)}\n"
+            
+            await channel.send(summary)
+            
+            # Send individual alerts (limit to prevent spam)
+            for alert in alerts[:20]:  # Max 20 alerts per scan
+                embed = create_alert_embed(alert)
+                await channel.send(embed=embed)
+            
+            if len(alerts) > 20:
+                await channel.send(f"⚠️ {len(alerts) - 20} additional alerts suppressed to prevent spam")
     
-    if alerts:
-        await channel.send(f"**🚨 War Room Scan Complete - {len(alerts)} alerts found**")
-        for alert in alerts:
-            embed = create_alert_embed(alert)
-            await channel.send(embed=embed)
+    except Exception as e:
+        print(f"Error in monitor task: {e}")
 
 
-@bot.command(name='setchannel')
+@bot.command()
 @commands.has_permissions(administrator=True)
-async def set_channel(ctx):
+async def setchannel(ctx):
     """Set the current channel as the alert channel"""
     global alert_channel_id
     alert_channel_id = ctx.channel.id
     await ctx.send(f"✅ Alert channel set to {ctx.channel.mention}")
 
 
-@bot.command(name='scan')
-async def manual_scan(ctx):
+@bot.command()
+async def scan(ctx):
     """Run a manual scan immediately"""
     await ctx.send("🔍 Running manual scan...")
     
@@ -278,13 +372,29 @@ async def manual_scan(ctx):
         await ctx.send("✅ Scan complete. No alerts found.")
         return
     
-    await ctx.send(f"**🚨 Scan Complete - {len(alerts)} alerts found**")
+    # Group by category
+    by_category = {}
     for alert in alerts:
+        if alert.category not in by_category:
+            by_category[alert.category] = []
+        by_category[alert.category].append(alert)
+    
+    summary = f"**🚨 Scan Complete - {len(alerts)} alerts**\n"
+    for category, cat_alerts in by_category.items():
+        summary += f"• {category}: {len(cat_alerts)}\n"
+    
+    await ctx.send(summary)
+    
+    # Send alerts (limit to 10)
+    for alert in alerts[:10]:
         embed = create_alert_embed(alert)
         await ctx.send(embed=embed)
+    
+    if len(alerts) > 10:
+        await ctx.send(f"⚠️ Showing first 10 of {len(alerts)} alerts. Use `!status` for full summary")
 
 
-@bot.command(name='status')
+@bot.command()
 async def status(ctx):
     """Check bot status and statistics"""
     embed = discord.Embed(
@@ -297,6 +407,10 @@ async def status(ctx):
     embed.add_field(name="Monitoring Active", value="✅ Yes" if monitor_task.is_running() else "❌ No", inline=True)
     embed.add_field(name="Scan Interval", value="1 minute", inline=True)
     
+    # Active endpoints
+    active = monitor.get_active_endpoints()
+    embed.add_field(name="Active Endpoints", value=str(len(active)), inline=True)
+    
     # Count alerts by level
     by_level = {}
     for alert in monitor.alerts:
@@ -306,13 +420,53 @@ async def status(ctx):
     if levels_text:
         embed.add_field(name="Alerts by Level", value=levels_text, inline=False)
     
+    # Count by category
+    by_category = {}
+    for alert in monitor.alerts:
+        by_category[alert.category] = by_category.get(alert.category, 0) + 1
+    
+    if by_category:
+        cat_text = "\n".join([f"• {cat}: {count}" for cat, count in sorted(by_category.items(), key=lambda x: x[1], reverse=True)[:5]])
+        embed.add_field(name="Top Categories", value=cat_text, inline=False)
+    
     await ctx.send(embed=embed)
 
 
-@bot.command(name='threshold')
+@bot.command()
+async def endpoints(ctx):
+    """Show all active endpoints being monitored"""
+    active = monitor.get_active_endpoints()
+    
+    if not active:
+        await ctx.send("⚠️ No active endpoints found. The API might be down or endpoints have changed.")
+        return
+    
+    # Group by category
+    by_type = {}
+    for endpoint in active:
+        prefix = endpoint.split('.')[0]
+        if prefix not in by_type:
+            by_type[prefix] = []
+        by_type[prefix].append(endpoint)
+    
+    embed = discord.Embed(
+        title=f"📡 Active Endpoints ({len(active)})",
+        color=discord.Color.blue()
+    )
+    
+    for prefix, endpoints in sorted(by_type.items()):
+        endpoint_list = "\n".join([f"• {e}" for e in endpoints[:10]])
+        if len(endpoints) > 10:
+            endpoint_list += f"\n... and {len(endpoints) - 10} more"
+        embed.add_field(name=f"{prefix.upper()}", value=endpoint_list, inline=False)
+    
+    await ctx.send(embed=embed)
+
+
+@bot.command()
 @commands.has_permissions(administrator=True)
-async def set_threshold(ctx, setting: str, value: float):
-    """Set alert thresholds. Usage: !war threshold price_change_percent 15"""
+async def threshold(ctx, setting: str, value: float):
+    """Set alert thresholds. Usage: !threshold price_change_percent 15"""
     if setting in monitor.thresholds:
         monitor.thresholds[setting] = value
         await ctx.send(f"✅ Set `{setting}` to `{value}`")
@@ -321,9 +475,9 @@ async def set_threshold(ctx, setting: str, value: float):
         await ctx.send(f"❌ Unknown setting. Available: {available}")
 
 
-@bot.command(name='interval')
+@bot.command()
 @commands.has_permissions(administrator=True)
-async def set_interval(ctx, minutes: int):
+async def interval(ctx, minutes: int):
     """Change the monitoring interval in minutes"""
     if minutes < 1:
         await ctx.send("❌ Interval must be at least 1 minute")
@@ -333,9 +487,9 @@ async def set_interval(ctx, minutes: int):
     await ctx.send(f"✅ Monitoring interval set to {minutes} minute(s)")
 
 
-@bot.command(name='start')
+@bot.command()
 @commands.has_permissions(administrator=True)
-async def start_monitoring(ctx):
+async def start(ctx):
     """Start the monitoring task"""
     if monitor_task.is_running():
         await ctx.send("⚠️ Monitoring is already running")
@@ -344,9 +498,9 @@ async def start_monitoring(ctx):
         await ctx.send("✅ Monitoring started")
 
 
-@bot.command(name='stop')
+@bot.command()
 @commands.has_permissions(administrator=True)
-async def stop_monitoring(ctx):
+async def stop(ctx):
     """Stop the monitoring task"""
     if monitor_task.is_running():
         monitor_task.cancel()
@@ -355,34 +509,35 @@ async def stop_monitoring(ctx):
         await ctx.send("⚠️ Monitoring is not running")
 
 
-@bot.command(name='clear')
+@bot.command()
 @commands.has_permissions(administrator=True)
-async def clear_alerts(ctx):
+async def clear(ctx):
     """Clear all stored alerts"""
     count = len(monitor.alerts)
     monitor.alerts.clear()
     await ctx.send(f"✅ Cleared {count} alerts")
 
 
-@bot.command(name='help')
-async def help_command(ctx):
+@bot.command()
+async def help(ctx):
     """Show all available commands"""
     embed = discord.Embed(
         title="🎯 War Room Bot Commands",
-        description="Monitor War Era for price changes, build resets, and war activity",
+        description="Monitor War Era for ALL activity: prices, builds, wars, economy, trades, and more",
         color=discord.Color.blue()
     )
     
     commands_list = [
-        ("!war setchannel", "Set current channel for alerts (Admin)"),
-        ("!war scan", "Run manual scan immediately"),
-        ("!war status", "Show bot status and statistics"),
-        ("!war threshold <setting> <value>", "Set alert thresholds (Admin)"),
-        ("!war interval <minutes>", "Change scan interval (Admin)"),
-        ("!war start", "Start monitoring (Admin)"),
-        ("!war stop", "Stop monitoring (Admin)"),
-        ("!war clear", "Clear all alerts (Admin)"),
-        ("!war help", "Show this help message"),
+        ("!setchannel", "Set current channel for alerts (Admin)"),
+        ("!scan", "Run manual scan immediately"),
+        ("!status", "Show bot status and statistics"),
+        ("!endpoints", "List all active endpoints being monitored"),
+        ("!threshold <setting> <value>", "Set alert thresholds (Admin)"),
+        ("!interval <minutes>", "Change scan interval (Admin)"),
+        ("!start", "Start monitoring (Admin)"),
+        ("!stop", "Stop monitoring (Admin)"),
+        ("!clear", "Clear all alerts (Admin)"),
+        ("!help", "Show this help message"),
     ]
     
     for cmd, desc in commands_list:
@@ -390,7 +545,7 @@ async def help_command(ctx):
     
     embed.add_field(
         name="Thresholds",
-        value="• `price_change_percent` (default: 20)\n• `build_change_threshold` (default: 15)\n• `large_trade_threshold` (default: 1000000)",
+        value="• `price_change_percent` (default: 20)\n• `build_change_threshold` (default: 15)\n• `stat_change_threshold` (default: 10)\n• `large_trade_threshold` (default: 1000000)",
         inline=False
     )
     
@@ -401,8 +556,7 @@ async def help_command(ctx):
 if __name__ == "__main__":
     import os
     
-    # Set your Discord bot token here or use environment variable
-    TOKEN = os.getenv('DISCORD_BOT_TOKEN')
+    TOKEN = os.getenv('DISCORD_BOT_TOKEN', 'YOUR_BOT_TOKEN_HERE')
     
     if TOKEN == 'YOUR_BOT_TOKEN_HERE':
         print("⚠️  Please set your Discord bot token!")
