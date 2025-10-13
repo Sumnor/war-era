@@ -33,101 +33,84 @@ class WarEraMonitor:
             'large_trade_threshold': 1000000,
         }
         
-        # All possible endpoints to monitor
+        # All possible endpoints to monitor (based on actual API docs)
         self.endpoints = [
             # Trading & Economy
             "itemTrading.getPrices",
-            "itemTrading.getRecent",
-            "itemTrading.getOrders",
-            "itemTrading.getHistory",
-            "market.getPrices",
-            "market.getOrders",
-            "market.getRecent",
-            "market.getTrades",
-            "bank.getLoans",
-            "bank.getInterestRates",
-            "trade.getActive",
-            "trade.getRecent",
-            "economy.getStats",
-            "economy.getTopProducers",
-            "economy.getTopTraders",
-            "economy.getGDP",
+            "tradingOrder.getTopOrders",
+            "itemOffer.getById",
+            "transaction.getPaginatedTransactions",
             
-            # Nations
-            "nation.getStats",
-            "nation.getBuilds",
-            "nation.getRecent",
-            "nation.getAttacks",
-            "nation.getDefenses",
-            "nation.getResources",
-            "nation.getActivity",
-            "nation.getChanges",
-            "nation.getMilitary",
-            "nation.getEconomy",
-            "nation.getProduction",
-            "nation.getRevenue",
-            "nation.getInfrastructure",
-            "nation.getLand",
-            "nation.getTechnology",
+            # Companies & Work
+            "company.getCompanies",
+            "company.getById",
+            "workOffer.getWorkOffersPaginated",
+            "workOffer.getWorkOfferByCompanyId",
+            "workOffer.getById",
             
-            # Rankings/Leaderboards
-            "rankings.getTopNations",
-            "rankings.getTopAlliances",
-            "rankings.getTopMilitary",
-            "rankings.getTopEconomy",
-            "rankings.getTopProduction",
-            "rankings.getTopRevenue",
-            "rankings.getTopGDP",
-            "rankings.getTopScore",
-            "rankings.getTopLand",
-            "rankings.getTopInfrastructure",
-            "leaderboard.getNations",
-            "leaderboard.getAlliances",
-            "leaderboard.getMilitary",
-            "leaderboard.getEconomy",
-            "stats.getTopProducers",
-            "stats.getTopNations",
-            "stats.getGlobal",
+            # Countries & Government
+            "country.getAllCountries",
+            "country.getCountryById",
+            "government.getByCountryId",
+            "region.getRegionsObject",
+            "region.getById",
             
-            # War
-            "war.getActive",
-            "war.getRecent",
-            "war.getAttacks",
-            "war.getDefenses",
-            "war.getHistory",
-            "war.getStats",
-            "war.getTopAttackers",
-            "war.getTopDefenders",
+            # Battle & War
+            "battle.getBattles",
+            "battle.getById",
+            "battle.getLiveBattleData",
+            "round.getById",
+            "round.getLastHits",
+            "battleRanking.getRanking",
             
-            # Alliance
-            "alliance.getWars",
-            "alliance.getMembers",
-            "alliance.getStats",
-            "alliance.getRecent",
-            "alliance.getTreaties",
-            "alliance.getActivity",
-            "alliance.getRankings",
-            "alliance.getTopAlliances",
+            # Rankings
+            "ranking.getRanking",
             
-            # User/Player
-            "user.getStats",
-            "user.getActivity",
-            "user.getRecent",
+            # Military Units
+            "mu.getManyPaginated",
+            "mu.getById",
             
-            # Global/World
-            "world.getStats",
-            "world.getActivity",
-            "world.getProduction",
-            "world.getResources",
-            "global.getStats",
-            "global.getProduction",
+            # Users
+            "user.getUserLite",
+            "user.getUsersByCountry",
+            
+            # Articles/News
+            "article.getArticlesPaginated",
+            "article.getArticleById",
+            
+            # Game Config
+            "gameConfig.getDates",
+            "gameConfig.getGameConfig",
+            
+            # Search
+            "search.searchAnything",
+            
+            # Upgrades
+            "upgrade.getUpgradeByTypeAndEntity",
         ]
     
     def fetch_endpoint(self, endpoint: str, params: Optional[Dict] = None) -> Optional[Dict]:
         try:
             url = f"{self.base_url}/{endpoint}"
-            response = requests.get(url, params=params, timeout=10)
-            response.raise_for_status()
+            
+            # tRPC endpoints use POST even though docs say GET
+            # Try POST first, then GET
+            response = None
+            for method in [requests.post, requests.get]:
+                try:
+                    if params:
+                        response = method(url, json={"input": params}, timeout=10)
+                    else:
+                        response = method(url, json={}, timeout=10)
+                    
+                    if response.status_code == 200:
+                        break
+                except:
+                    continue
+            
+            if response is None or response.status_code != 200:
+                return None
+            
             data = response.json()
             
             # tRPC often wraps data in a result object
@@ -138,11 +121,7 @@ class WarEraMonitor:
                     return data['result']
             
             return data
-        except requests.exceptions.RequestException as e:
-            # Only log non-404 errors
-            if hasattr(e, 'response') and e.response is not None:
-                if e.response.status_code != 404:
-                    print(f"Error fetching {endpoint}: {e}")
+        except Exception as e:
             return None
     
     def add_alert(self, level: AlertLevel, category: str, message: str, data: Dict = None):
@@ -227,20 +206,24 @@ class WarEraMonitor:
         """Categorize endpoint for alert grouping"""
         endpoint_lower = endpoint.lower()
         
-        if any(x in endpoint_lower for x in ['war', 'attack', 'defense']):
+        if any(x in endpoint_lower for x in ['battle', 'round', 'hit']):
+            return "BATTLE"
+        elif any(x in endpoint_lower for x in ['war', 'attack', 'defense']):
             return "WAR_ACTIVITY"
-        elif any(x in endpoint_lower for x in ['price', 'trade', 'market', 'bank', 'loan']):
+        elif any(x in endpoint_lower for x in ['price', 'trade', 'trading', 'offer', 'order', 'transaction']):
             return "ECONOMY"
-        elif any(x in endpoint_lower for x in ['build', 'military', 'soldier', 'tank']):
-            return "BUILD_CHANGE"
-        elif any(x in endpoint_lower for x in ['ranking', 'leaderboard', 'top', 'stats']):
+        elif any(x in endpoint_lower for x in ['company', 'work']):
+            return "COMPANIES"
+        elif any(x in endpoint_lower for x in ['ranking', 'leaderboard']):
             return "RANKINGS"
-        elif any(x in endpoint_lower for x in ['production', 'producer', 'revenue', 'gdp']):
-            return "PRODUCTION"
-        elif 'alliance' in endpoint_lower:
-            return "ALLIANCE"
-        elif 'nation' in endpoint_lower:
-            return "NATION"
+        elif any(x in endpoint_lower for x in ['country', 'government', 'region']):
+            return "COUNTRIES"
+        elif any(x in endpoint_lower for x in ['mu', 'military']):
+            return "MILITARY_UNITS"
+        elif 'user' in endpoint_lower:
+            return "USERS"
+        elif 'article' in endpoint_lower:
+            return "NEWS"
         else:
             return "GENERAL"
     
@@ -521,56 +504,46 @@ async def endpoints(ctx):
 
 
 @bot.command()
-async def top(ctx, category: str = "nations"):
-    """Show top nations/producers. Usage: !top nations, !top production, !top military, !top economy"""
-    await ctx.send(f"🔍 Fetching top {category}...")
+async def top(ctx, category: str = "users"):
+    """Show rankings. Usage: !top users, !top countries, !top battles"""
+    await ctx.send(f"🔍 Fetching {category} rankings...")
     
-    # Map category to endpoints
+    # Map category to endpoints and parameters
     endpoint_map = {
-        'nations': ['rankings.getTopNations', 'leaderboard.getNations', 'stats.getTopNations'],
-        'production': ['economy.getTopProducers', 'stats.getTopProducers', 'rankings.getTopProduction'],
-        'military': ['rankings.getTopMilitary', 'war.getTopAttackers'],
-        'economy': ['rankings.getTopEconomy', 'economy.getTopTraders', 'rankings.getTopGDP'],
-        'alliances': ['rankings.getTopAlliances', 'leaderboard.getAlliances', 'alliance.getTopAlliances'],
-        'revenue': ['rankings.getTopRevenue'],
-        'gdp': ['rankings.getTopGDP'],
-        'attackers': ['war.getTopAttackers'],
-        'defenders': ['war.getTopDefenders'],
+        'users': ('ranking.getRanking', {'type': 'user'}),
+        'countries': ('ranking.getRanking', {'type': 'country'}),
+        'battles': ('battleRanking.getRanking', {}),
+        'companies': ('company.getCompanies', {}),
+        'mus': ('mu.getManyPaginated', {}),
+        'military': ('mu.getManyPaginated', {}),
     }
     
-    endpoints = endpoint_map.get(category.lower(), endpoint_map['nations'])
+    endpoint_info = endpoint_map.get(category.lower(), endpoint_map['users'])
+    endpoint = endpoint_info[0]
+    params = endpoint_info[1]
     
-    data = None
-    used_endpoint = None
-    
-    # Try each endpoint until one works
-    for endpoint in endpoints:
-        data = monitor.fetch_endpoint(endpoint)
-        if data is not None:
-            used_endpoint = endpoint
-            break
+    data = monitor.fetch_endpoint(endpoint, params if params else None)
     
     if data is None:
-        await ctx.send(f"❌ Could not fetch data for category: {category}\nTried endpoints: {', '.join(endpoints)}")
+        await ctx.send(f"❌ Could not fetch data for category: {category}\nTried endpoint: {endpoint}")
         return
     
     embed = discord.Embed(
         title=f"🏆 Top {category.title()}",
-        description=f"Data from: `{used_endpoint}`",
+        description=f"Data from: `{endpoint}`",
         color=discord.Color.gold()
     )
     
     # Format the data
     if isinstance(data, list):
-        # List of items
         items_text = ""
         for i, item in enumerate(data[:10], 1):
             if isinstance(item, dict):
                 # Try to extract name and relevant stat
-                name = item.get('name', item.get('nation', item.get('id', 'Unknown')))
+                name = item.get('name', item.get('username', item.get('countryName', item.get('id', 'Unknown'))))
                 
                 # Find the most relevant stat
-                stat_keys = ['score', 'production', 'gdp', 'revenue', 'military', 'attacks', 'value']
+                stat_keys = ['score', 'damage', 'level', 'strength', 'experience', 'value', 'workers']
                 stat_value = None
                 stat_name = None
                 
@@ -581,7 +554,10 @@ async def top(ctx, category: str = "nations"):
                         break
                 
                 if stat_value is not None:
-                    items_text += f"{i}. **{name}** - {stat_name.title()}: {stat_value:,}\n"
+                    if isinstance(stat_value, (int, float)):
+                        items_text += f"{i}. **{name}** - {stat_name.title()}: {stat_value:,}\n"
+                    else:
+                        items_text += f"{i}. **{name}** - {stat_name.title()}: {stat_value}\n"
                 else:
                     items_text += f"{i}. **{name}**\n"
             else:
@@ -593,7 +569,6 @@ async def top(ctx, category: str = "nations"):
             embed.add_field(name="Data", value=f"```json\n{json.dumps(data[:3], indent=2)[:500]}```", inline=False)
     
     elif isinstance(data, dict):
-        # Dictionary of items
         items_text = ""
         for i, (key, value) in enumerate(list(data.items())[:10], 1):
             if isinstance(value, (int, float)):
@@ -608,9 +583,79 @@ async def top(ctx, category: str = "nations"):
 
 
 @bot.command()
+async def battles(ctx):
+    """Show active battles"""
+    await ctx.send("⚔️ Fetching active battles...")
+    
+    data = monitor.fetch_endpoint("battle.getBattles")
+    
+    if data is None:
+        await ctx.send("❌ Could not fetch battle data")
+        return
+    
+    embed = discord.Embed(
+        title="⚔️ Active Battles",
+        color=discord.Color.red()
+    )
+    
+    if isinstance(data, list):
+        for i, battle in enumerate(data[:5], 1):
+            if isinstance(battle, dict):
+                battle_info = f"ID: {battle.get('id', 'N/A')}\n"
+                if 'attackerCountry' in battle:
+                    battle_info += f"Attacker: {battle['attackerCountry']}\n"
+                if 'defenderCountry' in battle:
+                    battle_info += f"Defender: {battle['defenderCountry']}\n"
+                if 'region' in battle:
+                    battle_info += f"Region: {battle['region']}\n"
+                
+                embed.add_field(name=f"Battle #{i}", value=battle_info, inline=False)
+    else:
+        embed.add_field(name="Data", value=f"```json\n{json.dumps(data, indent=2)[:500]}```", inline=False)
+    
+    await ctx.send(embed=embed)
+
+
+@bot.command()
+async def prices(ctx):
+    """Show current item prices"""
+    await ctx.send("💰 Fetching item prices...")
+    
+    data = monitor.fetch_endpoint("itemTrading.getPrices")
+    
+    if data is None:
+        await ctx.send("❌ Could not fetch price data")
+        return
+    
+    embed = discord.Embed(
+        title="💰 Item Prices",
+        color=discord.Color.gold()
+    )
+    
+    if isinstance(data, dict):
+        price_text = ""
+        for item, price in list(data.items())[:15]:
+            if isinstance(price, (int, float)):
+                price_text += f"**{item}**: {price:,.2f}\n"
+            else:
+                price_text += f"**{item}**: {price}\n"
+        
+        if price_text:
+            embed.add_field(name="Current Prices", value=price_text, inline=False)
+    elif isinstance(data, list):
+        for i, item in enumerate(data[:10], 1):
+            if isinstance(item, dict):
+                name = item.get('name', item.get('itemType', f'Item {i}'))
+                price = item.get('price', item.get('value', 'N/A'))
+                embed.add_field(name=name, value=f"Price: {price}", inline=True)
+    
+    await ctx.send(embed=embed)
+
+
+@bot.command()
 async def production(ctx):
-    """Show top producing nations"""
-    await top(ctx, "production")
+    """Show top producing nations - alias for !top users"""
+    await top(ctx, "users")
     """Test a specific API endpoint. Usage: !testapi itemTrading.getPrices"""
     if endpoint is None:
         await ctx.send("⚠️ Usage: `!testapi <endpoint>`\nExample: `!testapi itemTrading.getPrices`")
@@ -716,7 +761,9 @@ async def help(ctx):
         ("!scan", "Run manual scan immediately"),
         ("!status", "Show bot status and statistics"),
         ("!endpoints", "List all active endpoints being monitored"),
+        ("!discover", "Try to discover API structure automatically"),
         ("!testapi <endpoint>", "Test a specific endpoint and see its data"),
+        ("!rawtest <url>", "Test a raw URL directly"),
         ("!top <category>", "Show rankings: nations, production, military, economy, alliances"),
         ("!production", "Show top producing nations (shortcut)"),
         ("!threshold <setting> <value>", "Set alert thresholds (Admin)"),
