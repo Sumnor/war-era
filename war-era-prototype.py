@@ -201,7 +201,7 @@ class WarEraMonitor:
 # Discord Bot
 intents = discord.Intents.default()
 intents.message_content = True
-bot = commands.Bot(command_prefix='!war ', intents=intents)
+bot = commands.Bot(command_prefix="!", intents=intents, help_command=None)
 
 monitor = WarEraMonitor()
 alert_channel_id = None  # Set this via !war setchannel
