@@ -3,7 +3,7 @@ from discord.ext import commands, tasks
 import requests
 import json
 from datetime import datetime
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Any
 from dataclasses import dataclass
 from enum import Enum
 
@@ -20,131 +20,105 @@ class Alert:
     message: str
     data: Dict
 
-class WarEraMonitor:
+class WarEraAPI:
+    """Handles all WarEra API interactions"""
+    
     def __init__(self, base_url: str = "https://api2.warera.io/trpc"):
         self.base_url = base_url
+        self.cache = {}
+    
+    def call(self, endpoint: str, params: Optional[Dict] = None) -> Optional[Any]:
+        """Universal API caller - uses tRPC ?input={} format"""
+        try:
+            url = f"{self.base_url}/{endpoint}"
+            
+            # tRPC uses GET with ?input={json} query parameter
+            if params:
+                import urllib.parse
+                input_json = json.dumps(params)
+                encoded_input = urllib.parse.quote(input_json)
+                url = f"{url}?input={encoded_input}"
+            else:
+                # For endpoints that don't need params, still add ?input={}
+                url = f"{url}?input={{}}"
+            
+            response = requests.get(url, timeout=10)
+            
+            if response.status_code != 200:
+                return None
+            
+            data = response.json()
+            
+            # Unwrap tRPC response
+            if isinstance(data, dict):
+                if 'result' in data and 'data' in data['result']:
+                    return data['result']['data']
+                elif 'result' in data:
+                    return data['result']
+            
+            return data
+        except Exception as e:
+            print(f"API error for {endpoint}: {e}")
+            return None
+
+class WarEraMonitor:
+    def __init__(self):
+        self.api = WarEraAPI()
         self.previous_data = {}
         self.alerts = []
         
         self.thresholds = {
             'price_change_percent': 20,
-            'build_change_threshold': 15,
-            'stat_change_threshold': 10,
-            'large_trade_threshold': 1000000,
+            'battle_threshold': 1,
+            'ranking_change': 5,
         }
         
-        # All possible endpoints to monitor (based on actual API docs)
-        self.endpoints = [
-            # Trading & Economy
-            "itemTrading.getPrices",
-            "tradingOrder.getTopOrders",
-            "itemOffer.getById",
-            "transaction.getPaginatedTransactions",
-            
-            # Companies & Work
-            "company.getCompanies",
-            "company.getById",
-            "workOffer.getWorkOffersPaginated",
-            "workOffer.getWorkOfferByCompanyId",
-            "workOffer.getById",
-            
-            # Countries & Government
-            "country.getAllCountries",
-            "country.getCountryById",
-            "government.getByCountryId",
-            "region.getRegionsObject",
-            "region.getById",
-            
-            # Battle & War
-            "battle.getBattles",
-            "battle.getById",
-            "battle.getLiveBattleData",
-            "round.getById",
-            "round.getLastHits",
-            "battleRanking.getRanking",
-            
-            # Rankings
-            "ranking.getRanking",
-            
-            # Military Units
-            "mu.getManyPaginated",
-            "mu.getById",
-            
-            # Users
-            "user.getUserLite",
-            "user.getUsersByCountry",
-            
-            # Articles/News
-            "article.getArticlesPaginated",
-            "article.getArticleById",
-            
-            # Game Config
-            "gameConfig.getDates",
-            "gameConfig.getGameConfig",
-            
-            # Search
-            "search.searchAnything",
-            
-            # Upgrades
-            "upgrade.getUpgradeByTypeAndEntity",
-        ]
-    
-    def fetch_endpoint(self, endpoint: str, params: Optional[Dict] = None) -> Optional[Dict]:
-        try:
-            url = f"{self.base_url}/{endpoint}"
-            
-            # tRPC endpoints use POST with JSON body
-            # Try different parameter formats
-            response = None
-            
-            # Try POST with input wrapper (tRPC standard)
-            if params:
-                try:
-                    response = requests.post(url, json={"input": params}, timeout=10)
-                    if response.status_code == 200:
-                        data = response.json()
-                        if 'result' in data:
-                            return data['result'].get('data', data['result'])
-                        return data
-                except:
-                    pass
-            
-            # Try POST with direct params
-            try:
-                response = requests.post(url, json=params if params else {}, timeout=10)
-                if response.status_code == 200:
-                    data = response.json()
-                    if 'result' in data:
-                        return data['result'].get('data', data['result'])
-                    return data
-            except:
-                pass
-            
-            # Try GET with query params
-            try:
-                response = requests.get(url, params=params, timeout=10)
-                if response.status_code == 200:
-                    data = response.json()
-                    if 'result' in data:
-                        return data['result'].get('data', data['result'])
-                    return data
-            except:
-                pass
-            
-            # Try POST with no params (for endpoints that don't need them)
-            try:
-                response = requests.post(url, timeout=10)
-                if response.status_code == 200:
-                    data = response.json()
-                    if 'result' in data:
-                        return data['result'].get('data', data['result'])
-                    return data
-            except:
-                pass
-            
-            return None
-        except Exception as e:
-            return None
+        # All endpoints from docs
+        self.endpoints = {
+            # No params needed
+            'simple': [
+                'itemTrading.getPrices',
+                'battle.getBattles',
+                'country.getAllCountries',
+                'region.getRegionsObject',
+                'gameConfig.getDates',
+                'gameConfig.getGameConfig',
+            ],
+            # Requires ID
+            'by_id': [
+                'company.getById',
+                'country.getCountryById',
+                'region.getById',
+                'battle.getById',
+                'round.getById',
+                'itemOffer.getById',
+                'workOffer.getById',
+                'user.getUserLite',
+                'article.getArticleById',
+                'mu.getById',
+            ],
+            # Requires pagination
+            'paginated': [
+                'company.getCompanies',
+                'workOffer.getWorkOffersPaginated',
+                'article.getArticlesPaginated',
+                'mu.getManyPaginated',
+                'transaction.getPaginatedTransactions',
+            ],
+            # Special params
+            'special': {
+                'ranking.getRanking': {'rankingType': 'weeklyCountryDamages'},
+                'battleRanking.getRanking': {},
+                'tradingOrder.getTopOrders': {'itemType': 'FOOD'},
+                'government.getByCountryId': {'countryId': 1},
+                'battle.getLiveBattleData': {'battleId': 1},
+                'round.getLastHits': {'roundId': 1},
+                'workOffer.getWorkOfferByCompanyId': {'companyId': 1},
+                'user.getUsersByCountry': {'countryId': 1},
+                'search.searchAnything': {'searchText': ''},
+                'upgrade.getUpgradeByTypeAndEntity': {'type': '', 'entity': ''},
+            }
+        }
     
     def add_alert(self, level: AlertLevel, category: str, message: str, data: Dict = None):
         alert = Alert(
@@ -157,169 +131,145 @@ class WarEraMonitor:
         self.alerts.append(alert)
         return alert
     
-    def detect_generic_changes(self, endpoint: str, old_data, new_data) -> List[Alert]:
-        """Generic change detection for any endpoint"""
+    def detect_changes(self, endpoint: str, old_data, new_data) -> List[Alert]:
+        """Generic change detection"""
         alerts = []
         
         try:
-            # Handle list data (new items added)
+            # List changes (new items)
             if isinstance(old_data, list) and isinstance(new_data, list):
                 old_count = len(old_data)
                 new_count = len(new_data)
                 
                 if new_count > old_count:
                     diff = new_count - old_count
-                    level = AlertLevel.CRITICAL if diff > 5 or 'war' in endpoint.lower() or 'attack' in endpoint.lower() else AlertLevel.WARNING
+                    level = AlertLevel.CRITICAL if 'battle' in endpoint else AlertLevel.WARNING
                     
                     alert = self.add_alert(
                         level,
-                        self._categorize_endpoint(endpoint),
-                        f"New activity in {endpoint}: +{diff} entries",
-                        {
-                            'endpoint': endpoint,
-                            'old_count': old_count,
-                            'new_count': new_count,
-                            'increase': diff
-                        }
+                        self._categorize(endpoint),
+                        f"🆕 {endpoint}: +{diff} new items",
+                        {'endpoint': endpoint, 'new_items': diff}
                     )
                     alerts.append(alert)
             
-            # Handle dict data (value changes)
+            # Dict changes (prices, stats)
             elif isinstance(old_data, dict) and isinstance(new_data, dict):
                 for key, new_val in new_data.items():
-                    if key in old_data:
+                    if key in old_data and isinstance(new_val, (int, float)) and isinstance(old_data[key], (int, float)):
                         old_val = old_data[key]
-                        
-                        # Check numeric changes
-                        if isinstance(old_val, (int, float)) and isinstance(new_val, (int, float)) and old_val != 0:
-                            change_percent = ((new_val - old_val) / abs(old_val)) * 100
+                        if old_val != 0:
+                            change_pct = ((new_val - old_val) / abs(old_val)) * 100
                             
-                            # Different thresholds for different types
-                            threshold = self._get_threshold_for_key(key, endpoint)
+                            threshold = 20 if 'price' in key.lower() else 30
                             
-                            if abs(change_percent) >= threshold:
-                                level = self._determine_alert_level(change_percent, key, endpoint)
-                                
+                            if abs(change_pct) >= threshold:
+                                level = AlertLevel.CRITICAL if abs(change_pct) > 50 else AlertLevel.WARNING
                                 alert = self.add_alert(
                                     level,
-                                    self._categorize_endpoint(endpoint),
-                                    f"{endpoint}.{key}: {change_percent:+.1f}% change",
-                                    {
-                                        'endpoint': endpoint,
-                                        'key': key,
-                                        'old_value': old_val,
-                                        'new_value': new_val,
-                                        'change_percent': change_percent
-                                    }
+                                    self._categorize(endpoint),
+                                    f"📊 {key}: {change_pct:+.1f}%",
+                                    {'key': key, 'old': old_val, 'new': new_val, 'change': change_pct}
                                 )
                                 alerts.append(alert)
-                        
-                        # Check nested dicts
-                        elif isinstance(old_val, dict) and isinstance(new_val, dict):
-                            nested_alerts = self.detect_generic_changes(f"{endpoint}.{key}", old_val, new_val)
-                            alerts.extend(nested_alerts)
-        
         except Exception as e:
-            print(f"Error detecting changes in {endpoint}: {e}")
+            pass
         
         return alerts
     
-    def _categorize_endpoint(self, endpoint: str) -> str:
-        """Categorize endpoint for alert grouping"""
-        endpoint_lower = endpoint.lower()
-        
-        if any(x in endpoint_lower for x in ['battle', 'round', 'hit']):
-            return "BATTLE"
-        elif any(x in endpoint_lower for x in ['war', 'attack', 'defense']):
-            return "WAR_ACTIVITY"
-        elif any(x in endpoint_lower for x in ['price', 'trade', 'trading', 'offer', 'order', 'transaction']):
-            return "ECONOMY"
-        elif any(x in endpoint_lower for x in ['company', 'work']):
-            return "COMPANIES"
-        elif any(x in endpoint_lower for x in ['ranking', 'leaderboard']):
-            return "RANKINGS"
-        elif any(x in endpoint_lower for x in ['country', 'government', 'region']):
-            return "COUNTRIES"
-        elif any(x in endpoint_lower for x in ['mu', 'military']):
-            return "MILITARY_UNITS"
-        elif 'user' in endpoint_lower:
-            return "USERS"
-        elif 'article' in endpoint_lower:
-            return "NEWS"
-        else:
-            return "GENERAL"
+    def _categorize(self, endpoint: str) -> str:
+        """Categorize endpoint for alerts"""
+        e = endpoint.lower()
+        if 'battle' in e or 'round' in e: return "⚔️ BATTLE"
+        if 'price' in e or 'trading' in e or 'offer' in e: return "💰 ECONOMY"
+        if 'company' in e or 'work' in e: return "🏢 COMPANIES"
+        if 'ranking' in e: return "🏆 RANKINGS"
+        if 'country' in e or 'government' in e: return "🌍 COUNTRIES"
+        if 'user' in e: return "👤 USERS"
+        if 'mu' in e: return "🎖️ MILITARY"
+        if 'article' in e: return "📰 NEWS"
+        return "📋 GENERAL"
     
-    def _get_threshold_for_key(self, key: str, endpoint: str) -> float:
-        """Get appropriate threshold based on key name"""
-        key_lower = key.lower()
+    def scan_simple_endpoints(self) -> List[Alert]:
+        """Scan all no-param endpoints"""
+        alerts = []
         
-        # Price changes - more sensitive
-        if 'price' in key_lower or 'cost' in key_lower:
-            return self.thresholds.get('price_change_percent', 20)
-        
-        # Military/war - very sensitive
-        if any(x in key_lower for x in ['military', 'attack', 'defense', 'soldier', 'tank', 'weapon']):
-            return self.thresholds.get('build_change_threshold', 15)
-        
-        # Economy - moderate sensitivity
-        if any(x in key_lower for x in ['bank', 'factory', 'farm', 'commerce', 'money', 'resource']):
-            return self.thresholds.get('stat_change_threshold', 10)
-        
-        # Default
-        return 25
-    
-    def _determine_alert_level(self, change_percent: float, key: str, endpoint: str) -> AlertLevel:
-        """Determine alert level based on change magnitude and context"""
-        key_lower = key.lower()
-        endpoint_lower = endpoint.lower()
-        
-        # Critical thresholds
-        if abs(change_percent) > 100:
-            return AlertLevel.CRITICAL
-        
-        # War-related changes are more critical
-        if any(x in key_lower or x in endpoint_lower for x in ['war', 'attack', 'military', 'defense']):
-            return AlertLevel.CRITICAL if abs(change_percent) > 30 else AlertLevel.WARNING
-        
-        # Price changes
-        if 'price' in key_lower:
-            return AlertLevel.CRITICAL if abs(change_percent) > 50 else AlertLevel.WARNING
-        
-        # Default
-        if abs(change_percent) > 50:
-            return AlertLevel.WARNING
-        
-        return AlertLevel.INFO
-    
-    def run_full_scan(self) -> List[Alert]:
-        """Scan all endpoints and detect changes"""
-        new_alerts = []
-        
-        for endpoint in self.endpoints:
-            data = self.fetch_endpoint(endpoint)
+        for endpoint in self.endpoints['simple']:
+            data = self.api.call(endpoint)
             
             if data is not None:
-                # Compare with previous data if exists
                 if endpoint in self.previous_data:
-                    alerts = self.detect_generic_changes(endpoint, self.previous_data[endpoint], data)
-                    new_alerts.extend(alerts)
+                    new_alerts = self.detect_changes(endpoint, self.previous_data[endpoint], data)
+                    alerts.extend(new_alerts)
                 
-                # Store current data
                 self.previous_data[endpoint] = data
         
-        return new_alerts
+        return alerts
+    
+    def scan_paginated_endpoints(self) -> List[Alert]:
+        """Scan paginated endpoints"""
+        alerts = []
+        
+        for endpoint in self.endpoints['paginated']:
+            data = self.api.call(endpoint, {'page': 1, 'limit': 50})
+            
+            if data is not None:
+                if endpoint in self.previous_data:
+                    new_alerts = self.detect_changes(endpoint, self.previous_data[endpoint], data)
+                    alerts.extend(new_alerts)
+                
+                self.previous_data[endpoint] = data
+        
+        return alerts
+    
+    def scan_special_endpoints(self) -> List[Alert]:
+        """Scan special param endpoints"""
+        alerts = []
+        
+        for endpoint, params in self.endpoints['special'].items():
+            if params:  # Only call if we have valid params
+                data = self.api.call(endpoint, params)
+                
+                if data is not None:
+                    if endpoint in self.previous_data:
+                        new_alerts = self.detect_changes(endpoint, self.previous_data[endpoint], data)
+                        alerts.extend(new_alerts)
+                    
+                    self.previous_data[endpoint] = data
+        
+        return alerts
+    
+    def run_full_scan(self) -> List[Alert]:
+        """Run complete scan"""
+        all_alerts = []
+        all_alerts.extend(self.scan_simple_endpoints())
+        all_alerts.extend(self.scan_paginated_endpoints())
+        all_alerts.extend(self.scan_special_endpoints())
+        return all_alerts
     
     def get_active_endpoints(self) -> List[str]:
-        """Discover which endpoints are actually available"""
+        """Find which endpoints work"""
         active = []
-        for endpoint in self.endpoints:
-            data = self.fetch_endpoint(endpoint)
-            if data is not None:
+        
+        # Test simple endpoints
+        for endpoint in self.endpoints['simple']:
+            if self.api.call(endpoint) is not None:
                 active.append(endpoint)
+        
+        # Test paginated
+        for endpoint in self.endpoints['paginated']:
+            if self.api.call(endpoint, {'page': 1}) is not None:
+                active.append(endpoint)
+        
+        # Test special
+        for endpoint, params in self.endpoints['special'].items():
+            if params and self.api.call(endpoint, params) is not None:
+                active.append(endpoint)
+        
         return active
 
 
-# Discord Bot Setup - FIXED PREFIX
+# Discord Bot
 intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents, help_command=None)
@@ -328,8 +278,7 @@ monitor = WarEraMonitor()
 alert_channel_id = None
 
 
-def create_alert_embed(alert: Alert) -> discord.Embed:
-    """Create a rich embed for an alert"""
+def create_embed(alert: Alert) -> discord.Embed:
     colors = {
         AlertLevel.INFO: discord.Color.blue(),
         AlertLevel.WARNING: discord.Color.gold(),
@@ -344,36 +293,31 @@ def create_alert_embed(alert: Alert) -> discord.Embed:
     )
     
     if alert.data:
-        # Limit fields to prevent embed size issues
-        count = 0
-        for key, value in alert.data.items():
-            if count >= 10:  # Discord embed field limit
-                break
+        for key, value in list(alert.data.items())[:10]:
             if isinstance(value, (int, float, str)) and len(str(value)) < 1024:
                 embed.add_field(name=key.replace('_', ' ').title(), value=str(value), inline=True)
-                count += 1
     
     return embed
 
 
 @bot.event
 async def on_ready():
-    print(f'{bot.user} has connected to Discord!')
-    print(f'Bot is in {len(bot.guilds)} guilds')
+    print(f'{bot.user} connected!')
+    print(f'In {len(bot.guilds)} guilds')
     
-    # Discover active endpoints
-    print('Discovering active endpoints...')
+    print('🔍 Discovering active endpoints...')
     active = monitor.get_active_endpoints()
-    print(f'Found {len(active)} active endpoints')
+    print(f'✅ Found {len(active)} active endpoints')
+    for ep in active[:10]:
+        print(f'  • {ep}')
     
     if not monitor_task.is_running():
         monitor_task.start()
-        print('Monitoring task started')
+        print('✅ Monitoring started')
 
 
 @tasks.loop(minutes=1)
 async def monitor_task():
-    """Background task that runs monitoring scans"""
     if alert_channel_id is None:
         return
     
@@ -385,36 +329,31 @@ async def monitor_task():
         alerts = monitor.run_full_scan()
         
         if alerts:
-            # Group alerts by category
-            by_category = {}
+            by_cat = {}
             for alert in alerts:
-                if alert.category not in by_category:
-                    by_category[alert.category] = []
-                by_category[alert.category].append(alert)
+                if alert.category not in by_cat:
+                    by_cat[alert.category] = []
+                by_cat[alert.category].append(alert)
             
-            # Send summary
             summary = f"**🚨 War Room Scan - {len(alerts)} alerts**\n"
-            for category, cat_alerts in by_category.items():
-                summary += f"• {category}: {len(cat_alerts)}\n"
+            for cat, cat_alerts in by_cat.items():
+                summary += f"• {cat}: {len(cat_alerts)}\n"
             
             await channel.send(summary)
             
-            # Send individual alerts (limit to prevent spam)
-            for alert in alerts[:20]:  # Max 20 alerts per scan
-                embed = create_alert_embed(alert)
+            for alert in alerts[:15]:
+                embed = create_embed(alert)
                 await channel.send(embed=embed)
             
-            if len(alerts) > 20:
-                await channel.send(f"⚠️ {len(alerts) - 20} additional alerts suppressed to prevent spam")
-    
+            if len(alerts) > 15:
+                await channel.send(f"⚠️ {len(alerts) - 15} more alerts suppressed")
     except Exception as e:
-        print(f"Error in monitor task: {e}")
+        print(f"Monitor error: {e}")
 
 
 @bot.command()
 @commands.has_permissions(administrator=True)
 async def setchannel(ctx):
-    """Set the current channel as the alert channel"""
     global alert_channel_id
     alert_channel_id = ctx.channel.id
     await ctx.send(f"✅ Alert channel set to {ctx.channel.mention}")
@@ -422,371 +361,246 @@ async def setchannel(ctx):
 
 @bot.command()
 async def scan(ctx):
-    """Run a manual scan immediately"""
-    await ctx.send("🔍 Running manual scan...")
+    await ctx.send("🔍 Running scan...")
     
     alerts = monitor.run_full_scan()
     
     if not alerts:
-        await ctx.send("✅ Scan complete. No alerts found.")
+        await ctx.send("✅ No alerts")
         return
     
-    # Group by category
-    by_category = {}
+    by_cat = {}
     for alert in alerts:
-        if alert.category not in by_category:
-            by_category[alert.category] = []
-        by_category[alert.category].append(alert)
+        if alert.category not in by_cat:
+            by_cat[alert.category] = []
+        by_cat[alert.category].append(alert)
     
-    summary = f"**🚨 Scan Complete - {len(alerts)} alerts**\n"
-    for category, cat_alerts in by_category.items():
-        summary += f"• {category}: {len(cat_alerts)}\n"
+    summary = f"**🚨 {len(alerts)} alerts**\n"
+    for cat, cat_alerts in by_cat.items():
+        summary += f"• {cat}: {len(cat_alerts)}\n"
     
     await ctx.send(summary)
     
-    # Send alerts (limit to 10)
     for alert in alerts[:10]:
-        embed = create_alert_embed(alert)
+        embed = create_embed(alert)
         await ctx.send(embed=embed)
-    
-    if len(alerts) > 10:
-        await ctx.send(f"⚠️ Showing first 10 of {len(alerts)} alerts. Use `!status` for full summary")
-
-
-@bot.command()
-async def status(ctx):
-    """Check bot status and statistics"""
-    embed = discord.Embed(
-        title="🎯 War Room Status",
-        color=discord.Color.green()
-    )
-    
-    embed.add_field(name="Alert Channel", value=f"<#{alert_channel_id}>" if alert_channel_id else "Not set", inline=False)
-    embed.add_field(name="Total Alerts", value=str(len(monitor.alerts)), inline=True)
-    embed.add_field(name="Monitoring Active", value="✅ Yes" if monitor_task.is_running() else "❌ No", inline=True)
-    embed.add_field(name="Scan Interval", value="1 minute", inline=True)
-    
-    # Active endpoints
-    active = monitor.get_active_endpoints()
-    embed.add_field(name="Active Endpoints", value=str(len(active)), inline=True)
-    
-    # Count alerts by level
-    by_level = {}
-    for alert in monitor.alerts:
-        by_level[alert.level] = by_level.get(alert.level, 0) + 1
-    
-    levels_text = "\n".join([f"{level.value} {level.name}: {count}" for level, count in by_level.items()])
-    if levels_text:
-        embed.add_field(name="Alerts by Level", value=levels_text, inline=False)
-    
-    # Count by category
-    by_category = {}
-    for alert in monitor.alerts:
-        by_category[alert.category] = by_category.get(alert.category, 0) + 1
-    
-    if by_category:
-        cat_text = "\n".join([f"• {cat}: {count}" for cat, count in sorted(by_category.items(), key=lambda x: x[1], reverse=True)[:5]])
-        embed.add_field(name="Top Categories", value=cat_text, inline=False)
-    
-    await ctx.send(embed=embed)
-
-
-@bot.command()
-async def endpoints(ctx):
-    """Show all active endpoints being monitored"""
-    await ctx.send("🔍 Scanning all endpoints... this may take a moment")
-    
-    active = monitor.get_active_endpoints()
-    
-    if not active:
-        await ctx.send("⚠️ No active endpoints found. The API might be down or endpoints have changed.")
-        return
-    
-    # Group by category
-    by_type = {}
-    for endpoint in active:
-        prefix = endpoint.split('.')[0]
-        if prefix not in by_type:
-            by_type[prefix] = []
-        by_type[prefix].append(endpoint)
-    
-    embed = discord.Embed(
-        title=f"📡 Active Endpoints ({len(active)})",
-        description="These endpoints are responding and being monitored",
-        color=discord.Color.blue()
-    )
-    
-    for prefix, endpoints in sorted(by_type.items()):
-        endpoint_list = "\n".join([f"• `{e}`" for e in endpoints[:10]])
-        if len(endpoints) > 10:
-            endpoint_list += f"\n... and {len(endpoints) - 10} more"
-        embed.add_field(name=f"📂 {prefix.upper()}", value=endpoint_list, inline=False)
-    
-    await ctx.send(embed=embed)
-
-
-@bot.command()
-async def top(ctx, category: str = "damage"):
-    """Show rankings. Usage: !top damage, !top countries, !top battles"""
-    await ctx.send(f"🔍 Fetching {category} rankings...")
-    
-    # Map category to endpoints and parameters (based on actual API docs)
-    # ranking.getRanking uses rankingType parameter
-    endpoint_map = {
-        'damage': ('ranking.getRanking', {'rankingType': 'weeklyCountryDamages'}),
-        'weekly': ('ranking.getRanking', {'rankingType': 'weeklyCountryDamages'}),
-        'countries': ('ranking.getRanking', {'rankingType': 'weeklyCountryDamages'}),
-        'users': ('ranking.getRanking', {'rankingType': 'weeklyCountryDamages'}),
-        'battles': ('battleRanking.getRanking', {}),
-        'companies': ('company.getCompanies', {'page': 1}),
-        'mus': ('mu.getManyPaginated', {'page': 1}),
-        'military': ('mu.getManyPaginated', {'page': 1}),
-    }
-    
-    endpoint_info = endpoint_map.get(category.lower())
-    if not endpoint_info:
-        available = ', '.join(endpoint_map.keys())
-        await ctx.send(f"❌ Unknown category. Available: {available}")
-        return
-    
-    endpoint, params = endpoint_info
-    
-    data = monitor.fetch_endpoint(endpoint, params)
-    
-    if data is None:
-        # Try to get more info about the error
-        await ctx.send(f"❌ Could not fetch data for category: {category}\n**Endpoint:** `{endpoint}`\n**Params:** `{params}`\n\nTry `!testapi {endpoint}` to see the raw response")
-        return
-    
-    embed = discord.Embed(
-        title=f"🏆 Top {category.title()}",
-        description=f"Data from: `{endpoint}`",
-        color=discord.Color.gold()
-    )
-    
-    # Format the data
-    items_to_show = data
-    if isinstance(data, dict):
-        # Check if data has items/results/data/ranking field
-        for key in ['items', 'results', 'data', 'ranking', 'rankings']:
-            if key in data:
-                items_to_show = data[key]
-                break
-    
-    if isinstance(items_to_show, list):
-        items_text = ""
-        for i, item in enumerate(items_to_show[:10], 1):
-            if isinstance(item, dict):
-                # Try to extract name and relevant stat
-                name = item.get('name', item.get('username', item.get('countryName', item.get('country', item.get('id', 'Unknown')))))
-                
-                # Find the most relevant stat
-                stat_keys = ['damage', 'score', 'level', 'strength', 'experience', 'value', 'workers', 'citizens', 'totalDamage']
-                stat_value = None
-                stat_name = None
-                
-                for key in stat_keys:
-                    if key in item:
-                        stat_value = item[key]
-                        stat_name = key
-                        break
-                
-                if stat_value is not None:
-                    if isinstance(stat_value, (int, float)):
-                        items_text += f"{i}. **{name}** - {stat_name.title()}: {stat_value:,}\n"
-                    else:
-                        items_text += f"{i}. **{name}** - {stat_name.title()}: {stat_value}\n"
-                else:
-                    items_text += f"{i}. **{name}**\n"
-            else:
-                items_text += f"{i}. {item}\n"
-        
-        if items_text:
-            embed.add_field(name="Rankings", value=items_text, inline=False)
-        else:
-            embed.add_field(name="Data Preview", value=f"```json\n{json.dumps(items_to_show[:2], indent=2)[:500]}```", inline=False)
-    
-    elif isinstance(data, dict):
-        items_text = ""
-        count = 0
-        for key, value in data.items():
-            if count >= 10:
-                break
-            if isinstance(value, (int, float)):
-                items_text += f"**{key}**: {value:,}\n"
-                count += 1
-            elif isinstance(value, str) and len(value) < 100:
-                items_text += f"**{key}**: {value}\n"
-                count += 1
-        
-        if items_text:
-            embed.add_field(name="Data", value=items_text, inline=False)
-        else:
-            embed.add_field(name="Raw Data", value=f"```json\n{json.dumps(data, indent=2)[:500]}```", inline=False)
-    
-    await ctx.send(embed=embed)
-
-
-@bot.command()
-async def battles(ctx):
-    """Show active battles"""
-    await ctx.send("⚔️ Fetching active battles...")
-    
-    data = monitor.fetch_endpoint("battle.getBattles")
-    
-    if data is None:
-        await ctx.send("❌ Could not fetch battle data")
-        return
-    
-    embed = discord.Embed(
-        title="⚔️ Active Battles",
-        color=discord.Color.red()
-    )
-    
-    if isinstance(data, list):
-        for i, battle in enumerate(data[:5], 1):
-            if isinstance(battle, dict):
-                battle_info = f"ID: {battle.get('id', 'N/A')}\n"
-                if 'attackerCountry' in battle:
-                    battle_info += f"Attacker: {battle['attackerCountry']}\n"
-                if 'defenderCountry' in battle:
-                    battle_info += f"Defender: {battle['defenderCountry']}\n"
-                if 'region' in battle:
-                    battle_info += f"Region: {battle['region']}\n"
-                
-                embed.add_field(name=f"Battle #{i}", value=battle_info, inline=False)
-    else:
-        embed.add_field(name="Data", value=f"```json\n{json.dumps(data, indent=2)[:500]}```", inline=False)
-    
-    await ctx.send(embed=embed)
 
 
 @bot.command()
 async def prices(ctx):
-    """Show current item prices"""
-    await ctx.send("💰 Fetching item prices...")
+    await ctx.send("💰 Fetching prices...")
     
-    data = monitor.fetch_endpoint("itemTrading.getPrices")
+    data = monitor.api.call("itemTrading.getPrices")
     
-    if data is None:
-        await ctx.send("❌ Could not fetch price data")
+    if not data:
+        await ctx.send("❌ Could not fetch prices")
         return
     
-    embed = discord.Embed(
-        title="💰 Item Prices",
-        color=discord.Color.gold()
-    )
+    embed = discord.Embed(title="💰 Item Prices", color=discord.Color.gold())
     
     if isinstance(data, dict):
         price_text = ""
         for item, price in list(data.items())[:15]:
             if isinstance(price, (int, float)):
                 price_text += f"**{item}**: {price:,.2f}\n"
-            else:
-                price_text += f"**{item}**: {price}\n"
-        
         if price_text:
-            embed.add_field(name="Current Prices", value=price_text, inline=False)
-    elif isinstance(data, list):
-        for i, item in enumerate(data[:10], 1):
-            if isinstance(item, dict):
-                name = item.get('name', item.get('itemType', f'Item {i}'))
-                price = item.get('price', item.get('value', 'N/A'))
-                embed.add_field(name=name, value=f"Price: {price}", inline=True)
+            embed.add_field(name="Prices", value=price_text, inline=False)
     
     await ctx.send(embed=embed)
 
 
 @bot.command()
-async def production(ctx):
-    """Show top producing nations - alias for !top users"""
-    await top(ctx, "users")
-    """Test a specific API endpoint. Usage: !testapi itemTrading.getPrices"""
-    if endpoint is None:
-        await ctx.send("⚠️ Usage: `!testapi <endpoint>`\nExample: `!testapi itemTrading.getPrices`")
+async def battles(ctx):
+    await ctx.send("⚔️ Fetching battles...")
+    
+    data = monitor.api.call("battle.getBattles")
+    
+    if not data:
+        await ctx.send("❌ Could not fetch battles")
         return
     
-    await ctx.send(f"🔍 Testing endpoint: `{endpoint}`")
+    embed = discord.Embed(title="⚔️ Active Battles", color=discord.Color.red())
     
-    data = monitor.fetch_endpoint(endpoint)
+    battles = data if isinstance(data, list) else [data]
     
-    if data is None:
-        await ctx.send(f"❌ Endpoint `{endpoint}` returned no data or errored")
+    for i, battle in enumerate(battles[:5], 1):
+        if isinstance(battle, dict):
+            info = ""
+            for key in ['id', 'attackerCountry', 'defenderCountry', 'region', 'status']:
+                if key in battle:
+                    info += f"**{key}**: {battle[key]}\n"
+            if info:
+                embed.add_field(name=f"Battle {i}", value=info, inline=False)
+    
+    await ctx.send(embed=embed)
+
+
+@bot.command()
+async def rankings(ctx, ranking_type: str = "weeklyCountryDamages"):
+    await ctx.send(f"🏆 Fetching {ranking_type}...")
+    
+    data = monitor.api.call("ranking.getRanking", {"rankingType": ranking_type})
+    
+    if not data:
+        await ctx.send(f"❌ Failed. Try: weeklyCountryDamages, etc")
         return
     
-    # Show data structure
+    embed = discord.Embed(title=f"🏆 {ranking_type}", color=discord.Color.gold())
+    
+    items = data
+    if isinstance(data, dict):
+        for key in ['items', 'rankings', 'data', 'results']:
+            if key in data:
+                items = data[key]
+                break
+    
+    if isinstance(items, list):
+        text = ""
+        for i, item in enumerate(items[:10], 1):
+            if isinstance(item, dict):
+                name = item.get('name', item.get('country', item.get('username', str(i))))
+                value = item.get('damage', item.get('score', item.get('value', '')))
+                if value:
+                    text += f"{i}. **{name}**: {value:,}\n"
+                else:
+                    text += f"{i}. **{name}**\n"
+        if text:
+            embed.add_field(name="Rankings", value=text, inline=False)
+    
+    await ctx.send(embed=embed)
+
+
+@bot.command()
+async def search(ctx, *, query: str):
+    await ctx.send(f"🔍 Searching: {query}")
+    
+    data = monitor.api.call("search.searchAnything", {"searchText": query})
+    
+    if not data:
+        await ctx.send("❌ No results")
+        return
+    
+    embed = discord.Embed(title=f"🔍 Results: {query}", color=discord.Color.blue())
+    
+    if isinstance(data, dict):
+        for category, items in data.items():
+            if isinstance(items, list) and items:
+                text = ""
+                for item in items[:5]:
+                    if isinstance(item, dict):
+                        name = item.get('name', item.get('username', item.get('title', str(item.get('id')))))
+                        text += f"• {name}\n"
+                if text:
+                    embed.add_field(name=category.title(), value=text, inline=False)
+    
+    await ctx.send(embed=embed)
+
+
+@bot.command()
+async def countries(ctx):
+    await ctx.send("🌍 Fetching countries...")
+    
+    data = monitor.api.call("country.getAllCountries")
+    
+    if not data:
+        await ctx.send("❌ Failed")
+        return
+    
+    embed = discord.Embed(title="🌍 Countries", color=discord.Color.green())
+    
+    countries = data if isinstance(data, list) else []
+    
+    text = ""
+    for country in countries[:20]:
+        if isinstance(country, dict):
+            name = country.get('name', country.get('id', ''))
+            text += f"• {name}\n"
+    
+    if text:
+        embed.add_field(name="Countries", value=text, inline=False)
+    
+    await ctx.send(embed=embed)
+
+
+@bot.command()
+async def endpoints(ctx):
+    await ctx.send("🔍 Scanning endpoints...")
+    
+    active = monitor.get_active_endpoints()
+    
     embed = discord.Embed(
-        title=f"✅ Endpoint Active: {endpoint}",
-        color=discord.Color.green()
+        title=f"📡 Active Endpoints ({len(active)})",
+        color=discord.Color.blue()
     )
     
-    data_type = type(data).__name__
-    embed.add_field(name="Data Type", value=data_type, inline=True)
+    by_type = {}
+    for ep in active:
+        prefix = ep.split('.')[0]
+        if prefix not in by_type:
+            by_type[prefix] = []
+        by_type[prefix].append(ep)
     
-    if isinstance(data, list):
-        embed.add_field(name="Item Count", value=str(len(data)), inline=True)
-        if data:
-            embed.add_field(name="Sample Item", value=f"```json\n{json.dumps(data[0], indent=2)[:500]}```", inline=False)
-    elif isinstance(data, dict):
-        embed.add_field(name="Keys", value=str(len(data.keys())), inline=True)
-        embed.add_field(name="Key Names", value=", ".join(list(data.keys())[:10]), inline=False)
-        embed.add_field(name="Sample Data", value=f"```json\n{json.dumps(data, indent=2)[:500]}```", inline=False)
-    else:
-        embed.add_field(name="Raw Data", value=f"```{str(data)[:500]}```", inline=False)
+    for prefix, eps in sorted(by_type.items()):
+        text = "\n".join([f"• `{e}`" for e in eps[:10]])
+        if len(eps) > 10:
+            text += f"\n... +{len(eps)-10} more"
+        embed.add_field(name=f"📂 {prefix.upper()}", value=text, inline=False)
     
     await ctx.send(embed=embed)
 
 
 @bot.command()
-@commands.has_permissions(administrator=True)
-async def threshold(ctx, setting: str, value: float):
-    """Set alert thresholds. Usage: !threshold price_change_percent 15"""
-    if setting in monitor.thresholds:
-        monitor.thresholds[setting] = value
-        await ctx.send(f"✅ Set `{setting}` to `{value}`")
-    else:
-        available = ", ".join(monitor.thresholds.keys())
-        await ctx.send(f"❌ Unknown setting. Available: {available}")
+async def status(ctx):
+    embed = discord.Embed(title="🎯 War Room Status", color=discord.Color.green())
+    
+    embed.add_field(name="Alert Channel", value=f"<#{alert_channel_id}>" if alert_channel_id else "Not set", inline=False)
+    embed.add_field(name="Total Alerts", value=str(len(monitor.alerts)), inline=True)
+    embed.add_field(name="Monitoring", value="✅ Yes" if monitor_task.is_running() else "❌ No", inline=True)
+    
+    by_level = {}
+    for alert in monitor.alerts:
+        by_level[alert.level] = by_level.get(alert.level, 0) + 1
+    
+    if by_level:
+        text = "\n".join([f"{level.value} {level.name}: {count}" for level, count in by_level.items()])
+        embed.add_field(name="Alerts by Level", value=text, inline=False)
+    
+    await ctx.send(embed=embed)
 
 
 @bot.command()
 @commands.has_permissions(administrator=True)
 async def interval(ctx, minutes: int):
-    """Change the monitoring interval in minutes"""
     if minutes < 1:
-        await ctx.send("❌ Interval must be at least 1 minute")
+        await ctx.send("❌ Min 1 minute")
         return
-    
     monitor_task.change_interval(minutes=minutes)
-    await ctx.send(f"✅ Monitoring interval set to {minutes} minute(s)")
+    await ctx.send(f"✅ Interval set to {minutes} min")
 
 
 @bot.command()
 @commands.has_permissions(administrator=True)
 async def start(ctx):
-    """Start the monitoring task"""
     if monitor_task.is_running():
-        await ctx.send("⚠️ Monitoring is already running")
+        await ctx.send("⚠️ Already running")
     else:
         monitor_task.start()
-        await ctx.send("✅ Monitoring started")
+        await ctx.send("✅ Started")
 
 
 @bot.command()
 @commands.has_permissions(administrator=True)
 async def stop(ctx):
-    """Stop the monitoring task"""
     if monitor_task.is_running():
         monitor_task.cancel()
-        await ctx.send("✅ Monitoring stopped")
+        await ctx.send("✅ Stopped")
     else:
-        await ctx.send("⚠️ Monitoring is not running")
+        await ctx.send("⚠️ Not running")
 
 
 @bot.command()
 @commands.has_permissions(administrator=True)
 async def clear(ctx):
-    """Clear all stored alerts"""
     count = len(monitor.alerts)
     monitor.alerts.clear()
     await ctx.send(f"✅ Cleared {count} alerts")
@@ -794,55 +608,38 @@ async def clear(ctx):
 
 @bot.command()
 async def help(ctx):
-    """Show all available commands"""
     embed = discord.Embed(
-        title="🎯 War Room Bot Commands",
-        description="Monitor War Era for ALL activity: prices, builds, wars, economy, trades, and more",
+        title="🎯 War Room Bot",
+        description="Monitor everything in War Era",
         color=discord.Color.blue()
     )
     
-    commands_list = [
-        ("!setchannel", "Set current channel for alerts (Admin)"),
-        ("!scan", "Run manual scan immediately"),
-        ("!status", "Show bot status and statistics"),
-        ("!endpoints", "List all active endpoints being monitored"),
-        ("!discover", "Try to discover API structure automatically"),
-        ("!testapi <endpoint>", "Test a specific endpoint and see its data"),
-        ("!rawtest <url>", "Test a raw URL directly"),
-        ("!top <category>", "Show rankings: users, countries, battles, companies, military"),
-        ("!battles", "Show active battles"),
-        ("!prices", "Show current item prices"),
-        ("!production", "Show top users (shortcut)"),
-        ("!threshold <setting> <value>", "Set alert thresholds (Admin)"),
-        ("!interval <minutes>", "Change scan interval (Admin)"),
-        ("!start", "Start monitoring (Admin)"),
-        ("!stop", "Stop monitoring (Admin)"),
-        ("!clear", "Clear all alerts (Admin)"),
-        ("!help", "Show this help message"),
+    cmds = [
+        ("!setchannel", "Set alert channel (Admin)"),
+        ("!scan", "Manual scan now"),
+        ("!status", "Bot statistics"),
+        ("!endpoints", "List active endpoints"),
+        ("!prices", "Item prices"),
+        ("!battles", "Active battles"),
+        ("!rankings [type]", "Rankings (weeklyCountryDamages, etc)"),
+        ("!search <query>", "Search anything"),
+        ("!countries", "List all countries"),
+        ("!interval <min>", "Change scan interval (Admin)"),
+        ("!start/stop", "Control monitoring (Admin)"),
+        ("!clear", "Clear alerts (Admin)"),
     ]
     
-    for cmd, desc in commands_list:
+    for cmd, desc in cmds:
         embed.add_field(name=cmd, value=desc, inline=False)
-    
-    embed.add_field(
-        name="Thresholds",
-        value="• `price_change_percent` (default: 20)\n• `build_change_threshold` (default: 15)\n• `stat_change_threshold` (default: 10)\n• `large_trade_threshold` (default: 1000000)",
-        inline=False
-    )
     
     await ctx.send(embed=embed)
 
 
-# Run the bot
 if __name__ == "__main__":
     import os
-    
     TOKEN = os.getenv('DISCORD_BOT_TOKEN', 'YOUR_BOT_TOKEN_HERE')
     
     if TOKEN == 'YOUR_BOT_TOKEN_HERE':
-        print("⚠️  Please set your Discord bot token!")
-        print("Either:")
-        print("1. Replace 'YOUR_BOT_TOKEN_HERE' in the code")
-        print("2. Set DISCORD_BOT_TOKEN environment variable")
+        print("⚠️ Set DISCORD_BOT_TOKEN environment variable!")
     else:
         bot.run(TOKEN)
