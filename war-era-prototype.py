@@ -17,7 +17,6 @@ PAGE_SIZE = 8
 intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents, help_command=None)
-bot.tree = discord.app_commands.CommandTree(bot)
 _session: Optional[aiohttp.ClientSession] = None
 
 # ---------- API ----------
