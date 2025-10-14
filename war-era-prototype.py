@@ -21,6 +21,71 @@ bot = commands.Bot(command_prefix="!", intents=intents, help_command=None)
 
 _session: Optional[aiohttp.ClientSession] = None
 
+# ---------- Pretty Ranking Embed ----------
+def pretty_ranking_embed(title: str, items: List[Dict], start_index: int = 0) -> List[discord.Embed]:
+    """
+    Create paginated embeds for ranking-style lists with emoji, links, and values.
+    """
+    pages: List[discord.Embed] = []
+    for i in range(0, len(items), PAGE_SIZE):
+        chunk = items[i:i + PAGE_SIZE]
+        e = make_embed(title, f"Showing {i + 1}-{i + len(chunk)} of {len(items)}")
+        for idx, entry in enumerate(chunk, start=1 + i):
+            # Rank emoji based on tier
+            tier = entry.get("tier", "").lower()
+            if tier.startswith("maste"): emoji = "🥇"
+            elif tier.startswith("gold"): emoji = "🥈"
+            elif tier.startswith("silv"): emoji = "🥉"
+            else: emoji = "🏵️"
+
+            # User link
+            uid = entry.get("user") or entry.get("id") or entry.get("name")
+            uname = entry.get("name") or uid
+            url = f"https://warera.io/profile/{uid}" if uid else "#"
+
+            # Value
+            val = entry.get("value") or entry.get("score") or entry.get("damage") or 0
+            val_s = f"{val:,}" if isinstance(val, int) else str(val)
+
+            e.add_field(name=f"{emoji} #{idx}", value=f"[{uname}]({url}) — ⚔️ {val_s}", inline=False)
+        pages.append(e)
+    if not pages:
+        pages.append(make_embed(title, "No data"))
+    return pages
+
+# ---------- Generic List Pagination ----------
+def pages_from_list(lst: List[Any], title: str) -> List[discord.Embed]:
+    """
+    Create paginated embeds from a generic list of items.
+    """
+    pages = []
+    for i in range(0, len(lst), PAGE_SIZE):
+        sub = lst[i:i + PAGE_SIZE]
+        e = make_embed(title, f"Showing {i + 1}-{i + len(sub)} of {len(lst)}")
+        for j, item in enumerate(sub, 1):
+            if isinstance(item, dict):
+                name = item.get("name") or item.get("id") or str(i + j)
+                summary_parts = []
+                for k in ('id', 'country', 'damage', 'score', 'price', 'status', 'region', 'title', 'username'):
+                    if k in item: summary_parts.append(f"{k}:{item[k]}")
+                summ = ", ".join(summary_parts) if summary_parts else json.dumps(item, default=str)[:80]
+                e.add_field(name=f"#{i + j}", value=safe_truncate(summ, MAX_FIELD_CHARS), inline=False)
+            else:
+                e.add_field(name=f"#{i + j}", value=str(item)[:MAX_FIELD_CHARS], inline=False)
+        pages.append(e)
+    if not pages:
+        pages.append(make_embed(title, "No data"))
+    return pages
+
+# ---------- Send Paginated Embeds ----------
+async def send_paginated(interaction: discord.Interaction, pages: List[discord.Embed]):
+    """
+    Send a paginated embed with navigation buttons.
+    """
+    view = PageView(pages)
+    await interaction.response.send_message(embed=pages[0], view=view)
+
+
 async def get_session() -> aiohttp.ClientSession:
     global _session
     if _session is None or _session.closed:
