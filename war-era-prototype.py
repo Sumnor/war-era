@@ -3,7 +3,7 @@ from typing import Optional, Dict, Any, List
 from datetime import datetime
 import discord
 from discord import app_commands
-from discord.ext import tasks, commands
+from discord.ext import tasks
 from discord.ui import View, Button
 
 # ---------- Config ----------
@@ -13,6 +13,7 @@ RETRY_ATTEMPTS = int(os.getenv("WARERA_RETRY_ATTEMPTS", "3"))
 RETRY_BACKOFF = float(os.getenv("WARERA_RETRY_BACKOFF", "0.6"))
 DEFAULT_DASH_INTERVAL = int(os.getenv("WARERA_DASH_INTERVAL", "60"))  # seconds
 PAGE_SIZE = 8
+DASH_CHANNEL_ID = os.getenv("WARERA_DASH_CHANNEL")
 
 # ---------- Bot Setup ----------
 intents = discord.Intents.default()
@@ -109,29 +110,6 @@ class PageView(View):
             await interaction.response.edit_message(embed=self.pages[self.current], view=self)
             self._update_button_states()
 
-# ---------- Pretty Ranking Embed ----------
-def pretty_ranking_embed(title:str, items:List[Dict], start_index:int=0) -> List[discord.Embed]:
-    pages:List[discord.Embed] = []
-    for i in range(0, len(items), PAGE_SIZE):
-        chunk = items[i:i+PAGE_SIZE]
-        e = make_embed(title, f"Showing {i+1}-{i+len(chunk)} of {len(items)}")
-        for idx, entry in enumerate(chunk, start=1+i):
-            tier = entry.get("tier","").lower()
-            if tier.startswith("maste"): emoji="🥇"
-            elif tier.startswith("gold"): emoji="🥈"
-            elif tier.startswith("silv"): emoji="🥉"
-            else: emoji="🏵️"
-            uid = entry.get("user") or entry.get("id") or entry.get("name")
-            uname = entry.get("name") or uid
-            url = f"https://warera.io/profile/{uid}" if uid else "#"
-            val = entry.get("value") or entry.get("score") or entry.get("damage") or 0
-            val_s = f"{val:,}" if isinstance(val,int) else str(val)
-            e.add_field(name=f"{emoji} #{idx}", value=f"[{uname}]({url}) — ⚔️ {val_s}", inline=False)
-        pages.append(e)
-    if not pages:
-        pages.append(make_embed(title,"No data"))
-    return pages
-
 # ---------- Render Pages ----------
 async def render_to_pages(endpoint:str, params:Optional[Dict]=None) -> List[discord.Embed]:
     data = await api_call(endpoint, params)
@@ -177,8 +155,9 @@ async def send_paginated(interaction: discord.Interaction, pages:List[discord.Em
     view=PageView(pages)
     await interaction.response.send_message(embed=pages[0], view=view)
 
-# Example ranking slash
-@bot.tree.command(name="rankings", description="View WarEra ")
+# ---------- Slash Commands ----------
+
+@bot.tree.command(name="rankings", description="View WarEra rankings")
 @app_commands.choices(ranking_type=[
     app_commands.Choice(name="User Damage", value="userDamages"),
     app_commands.Choice(name="Weekly User Damage", value="weeklyUserDamages"),
@@ -191,21 +170,29 @@ async def send_paginated(interaction: discord.Interaction, pages:List[discord.Em
     app_commands.Choice(name="Premium Gifts", value="userPremiumGifts"),
 ])
 @app_commands.describe(ranking_type="Type of ranking")
-async def rankings(interaction: discord.Interaction, ranking_type: str):
-    pages=await render_to_pages("ranking.getRanking", {"rankingType": ranking_type})
+async def rankings(interaction: discord.Interaction, ranking_type: app_commands.Choice[str]):
+    pages=await render_to_pages("ranking.getRanking", {"rankingType": ranking_type.value})
     await send_paginated(interaction, pages)
 
-# ---------- Custom Lists ----------
-CUSTOM_LISTS={
-    "fav_countries":["CountryA","CountryB","CountryC"],
-    "top_companies":["Comp1","Comp2","Comp3"]
-}
+@bot.tree.command(name="prices", description="Fetch item prices")
+async def prices(interaction: discord.Interaction):
+    pages=await render_to_pages("itemTrading.getPrices")
+    await send_paginated(interaction, pages)
 
-@bot.tree.command(name="lists", description="View your custom lists")
-async def lists(interaction: discord.Interaction):
-    e=make_embed("📋 Custom Lists")
-    for k,v in CUSTOM_LISTS.items():
-        e.add_field(name=k.title(),value="\n".join(v),inline=False)
+@bot.tree.command(name="battles", description="Fetch active battles")
+async def battles(interaction: discord.Interaction):
+    pages=await render_to_pages("battle.getBattles")
+    await send_paginated(interaction, pages)
+
+@bot.tree.command(name="countries", description="List all countries")
+async def countries(interaction: discord.Interaction):
+    pages=await render_to_pages("country.getAllCountries")
+    await send_paginated(interaction, pages)
+
+@bot.tree.command(name="status", description="Bot status and info")
+async def status(interaction: discord.Interaction):
+    e=make_embed("🎯 War Room Status")
+    e.add_field(name="Monitoring", value="✅ Running" if dash_loop.is_running() else "❌ Stopped")
     await interaction.response.send_message(embed=e)
 
 # ---------- Auto-refresh dashboard ----------
@@ -220,7 +207,7 @@ async def refresh_dashboard(channel:discord.TextChannel):
 
 @tasks.loop(seconds=DEFAULT_DASH_INTERVAL)
 async def dash_loop():
-    if DASH_CHANNEL_ID:=os.getenv("WARERA_DASH_CHANNEL"):
+    if DASH_CHANNEL_ID:
         ch=bot.get_channel(int(DASH_CHANNEL_ID))
         if ch: await refresh_dashboard(ch)
 
