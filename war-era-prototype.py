@@ -93,34 +93,56 @@ class WarEraMonitor:
         try:
             url = f"{self.base_url}/{endpoint}"
             
-            # tRPC endpoints use POST even though docs say GET
-            # Try POST first, then GET
+            # tRPC endpoints use POST with JSON body
+            # Try different parameter formats
             response = None
-            for method in [requests.post, requests.get]:
+            
+            # Try POST with input wrapper (tRPC standard)
+            if params:
                 try:
-                    if params:
-                        response = method(url, json={"input": params}, timeout=10)
-                    else:
-                        response = method(url, json={}, timeout=10)
-                    
+                    response = requests.post(url, json={"input": params}, timeout=10)
                     if response.status_code == 200:
-                        break
+                        data = response.json()
+                        if 'result' in data:
+                            return data['result'].get('data', data['result'])
+                        return data
                 except:
-                    continue
+                    pass
             
-            if response is None or response.status_code != 200:
-                return None
+            # Try POST with direct params
+            try:
+                response = requests.post(url, json=params if params else {}, timeout=10)
+                if response.status_code == 200:
+                    data = response.json()
+                    if 'result' in data:
+                        return data['result'].get('data', data['result'])
+                    return data
+            except:
+                pass
             
-            data = response.json()
+            # Try GET with query params
+            try:
+                response = requests.get(url, params=params, timeout=10)
+                if response.status_code == 200:
+                    data = response.json()
+                    if 'result' in data:
+                        return data['result'].get('data', data['result'])
+                    return data
+            except:
+                pass
             
-            # tRPC often wraps data in a result object
-            if isinstance(data, dict):
-                if 'result' in data and 'data' in data['result']:
-                    return data['result']['data']
-                elif 'result' in data:
-                    return data['result']
+            # Try POST with no params (for endpoints that don't need them)
+            try:
+                response = requests.post(url, timeout=10)
+                if response.status_code == 200:
+                    data = response.json()
+                    if 'result' in data:
+                        return data['result'].get('data', data['result'])
+                    return data
+            except:
+                pass
             
-            return data
+            return None
         except Exception as e:
             return None
     
@@ -504,28 +526,36 @@ async def endpoints(ctx):
 
 
 @bot.command()
-async def top(ctx, category: str = "users"):
-    """Show rankings. Usage: !top users, !top countries, !top battles"""
+async def top(ctx, category: str = "damage"):
+    """Show rankings. Usage: !top damage, !top countries, !top battles"""
     await ctx.send(f"🔍 Fetching {category} rankings...")
     
-    # Map category to endpoints and parameters
+    # Map category to endpoints and parameters (based on actual API docs)
+    # ranking.getRanking uses rankingType parameter
     endpoint_map = {
-        'users': ('ranking.getRanking', {'type': 'user'}),
-        'countries': ('ranking.getRanking', {'type': 'country'}),
+        'damage': ('ranking.getRanking', {'rankingType': 'weeklyCountryDamages'}),
+        'weekly': ('ranking.getRanking', {'rankingType': 'weeklyCountryDamages'}),
+        'countries': ('ranking.getRanking', {'rankingType': 'weeklyCountryDamages'}),
+        'users': ('ranking.getRanking', {'rankingType': 'weeklyCountryDamages'}),
         'battles': ('battleRanking.getRanking', {}),
-        'companies': ('company.getCompanies', {}),
-        'mus': ('mu.getManyPaginated', {}),
-        'military': ('mu.getManyPaginated', {}),
+        'companies': ('company.getCompanies', {'page': 1}),
+        'mus': ('mu.getManyPaginated', {'page': 1}),
+        'military': ('mu.getManyPaginated', {'page': 1}),
     }
     
-    endpoint_info = endpoint_map.get(category.lower(), endpoint_map['users'])
-    endpoint = endpoint_info[0]
-    params = endpoint_info[1]
+    endpoint_info = endpoint_map.get(category.lower())
+    if not endpoint_info:
+        available = ', '.join(endpoint_map.keys())
+        await ctx.send(f"❌ Unknown category. Available: {available}")
+        return
     
-    data = monitor.fetch_endpoint(endpoint, params if params else None)
+    endpoint, params = endpoint_info
+    
+    data = monitor.fetch_endpoint(endpoint, params)
     
     if data is None:
-        await ctx.send(f"❌ Could not fetch data for category: {category}\nTried endpoint: {endpoint}")
+        # Try to get more info about the error
+        await ctx.send(f"❌ Could not fetch data for category: {category}\n**Endpoint:** `{endpoint}`\n**Params:** `{params}`\n\nTry `!testapi {endpoint}` to see the raw response")
         return
     
     embed = discord.Embed(
@@ -535,15 +565,23 @@ async def top(ctx, category: str = "users"):
     )
     
     # Format the data
-    if isinstance(data, list):
+    items_to_show = data
+    if isinstance(data, dict):
+        # Check if data has items/results/data/ranking field
+        for key in ['items', 'results', 'data', 'ranking', 'rankings']:
+            if key in data:
+                items_to_show = data[key]
+                break
+    
+    if isinstance(items_to_show, list):
         items_text = ""
-        for i, item in enumerate(data[:10], 1):
+        for i, item in enumerate(items_to_show[:10], 1):
             if isinstance(item, dict):
                 # Try to extract name and relevant stat
-                name = item.get('name', item.get('username', item.get('countryName', item.get('id', 'Unknown'))))
+                name = item.get('name', item.get('username', item.get('countryName', item.get('country', item.get('id', 'Unknown')))))
                 
                 # Find the most relevant stat
-                stat_keys = ['score', 'damage', 'level', 'strength', 'experience', 'value', 'workers']
+                stat_keys = ['damage', 'score', 'level', 'strength', 'experience', 'value', 'workers', 'citizens', 'totalDamage']
                 stat_value = None
                 stat_name = None
                 
@@ -566,18 +604,25 @@ async def top(ctx, category: str = "users"):
         if items_text:
             embed.add_field(name="Rankings", value=items_text, inline=False)
         else:
-            embed.add_field(name="Data", value=f"```json\n{json.dumps(data[:3], indent=2)[:500]}```", inline=False)
+            embed.add_field(name="Data Preview", value=f"```json\n{json.dumps(items_to_show[:2], indent=2)[:500]}```", inline=False)
     
     elif isinstance(data, dict):
         items_text = ""
-        for i, (key, value) in enumerate(list(data.items())[:10], 1):
+        count = 0
+        for key, value in data.items():
+            if count >= 10:
+                break
             if isinstance(value, (int, float)):
-                items_text += f"{i}. **{key}**: {value:,}\n"
-            else:
-                items_text += f"{i}. **{key}**: {value}\n"
+                items_text += f"**{key}**: {value:,}\n"
+                count += 1
+            elif isinstance(value, str) and len(value) < 100:
+                items_text += f"**{key}**: {value}\n"
+                count += 1
         
         if items_text:
-            embed.add_field(name="Rankings", value=items_text, inline=False)
+            embed.add_field(name="Data", value=items_text, inline=False)
+        else:
+            embed.add_field(name="Raw Data", value=f"```json\n{json.dumps(data, indent=2)[:500]}```", inline=False)
     
     await ctx.send(embed=embed)
 
@@ -764,8 +809,10 @@ async def help(ctx):
         ("!discover", "Try to discover API structure automatically"),
         ("!testapi <endpoint>", "Test a specific endpoint and see its data"),
         ("!rawtest <url>", "Test a raw URL directly"),
-        ("!top <category>", "Show rankings: nations, production, military, economy, alliances"),
-        ("!production", "Show top producing nations (shortcut)"),
+        ("!top <category>", "Show rankings: users, countries, battles, companies, military"),
+        ("!battles", "Show active battles"),
+        ("!prices", "Show current item prices"),
+        ("!production", "Show top users (shortcut)"),
         ("!threshold <setting> <value>", "Set alert thresholds (Admin)"),
         ("!interval <minutes>", "Change scan interval (Admin)"),
         ("!start", "Start monitoring (Admin)"),
