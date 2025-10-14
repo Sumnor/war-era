@@ -16,8 +16,7 @@ PAGE_SIZE = 8
 
 # ---------- Bot Setup ----------
 intents = discord.Intents.default()
-bot = discord.Client(intents=intents)
-tree = app_commands.CommandTree(bot)
+bot = commands.Bot(command_prefix="!", intents=intents, help_command=None)
 
 _session: Optional[aiohttp.ClientSession] = None
 
