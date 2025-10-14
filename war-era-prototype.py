@@ -191,7 +191,7 @@ async def send_paginated(interaction: discord.Interaction, pages:List[discord.Em
     app_commands.Choice(name="Premium Gifts", value="userPremiumGifts"),
 ])
 @app_commands.describe(ranking_type="Type of ranking")
-async def (interaction: discord.Interaction, ranking_type: str):
+async def rankings(interaction: discord.Interaction, ranking_type: str):
     pages=await render_to_pages("ranking.getRanking", {"rankingType": ranking_type})
     await send_paginated(interaction, pages)
 
