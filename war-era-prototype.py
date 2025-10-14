@@ -1,26 +1,39 @@
+# warera_bot_v3.py
+"""
+WarEra Everything Bot v3
+- Prefix commands
+- Embeds + button-based pagination
+- Auto-refresh dashboards by editing
+- More endpoints from docs (economy, trading, battles, rankings, users, articles, MUs, etc.)
+- All API calls via GET ?input={}
+"""
+
 import os
 import json
 import asyncio
 import aiohttp
 import urllib.parse
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 from datetime import datetime
 import discord
 from discord.ext import commands, tasks
+from discord.ui import View, Button
 
 # ---------- Config ----------
 API_BASE = os.getenv("WARERA_API_BASE", "https://api2.warera.io/trpc")
 REQUEST_TIMEOUT = float(os.getenv("WARERA_REQUEST_TIMEOUT", "10"))
 RETRY_ATTEMPTS = int(os.getenv("WARERA_RETRY_ATTEMPTS", "3"))
 RETRY_BACKOFF = float(os.getenv("WARERA_RETRY_BACKOFF", "0.6"))
-DEFAULT_DASHBOARD_INTERVAL = int(os.getenv("WARERA_DASH_INTERVAL", "60"))  # seconds
+DEFAULT_DASH_INTERVAL = int(os.getenv("WARERA_DASH_INTERVAL", "60"))  # seconds
+
+# Max number of items per page in pagination
+PAGE_SIZE = 8
 
 # ---------- Bot setup ----------
 intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents, help_command=None)
 
-# Shared aiohttp session
 _session: Optional[aiohttp.ClientSession] = None
 
 async def get_session() -> aiohttp.ClientSession:
@@ -30,24 +43,18 @@ async def get_session() -> aiohttp.ClientSession:
         _session = aiohttp.ClientSession(timeout=timeout)
     return _session
 
-# ---------- Utility: tRPC GET with ?input={} ----------
 def build_trpc_url(endpoint: str, params: Optional[Dict] = None) -> str:
     base = API_BASE.rstrip("/")
-    endpoint = endpoint.strip().lstrip("/")  # normalise
+    endpoint = endpoint.strip().lstrip("/")
     url = f"{base}/{endpoint}"
     if params is None:
         input_json = "{}"
     else:
-        # compact JSON
         input_json = json.dumps(params, separators=(",", ":"))
     encoded = urllib.parse.quote(input_json, safe='')
     return f"{url}?input={encoded}"
 
 async def api_call(endpoint: str, params: Optional[Dict] = None) -> Optional[Any]:
-    """
-    GET ?input={} wrapper. Returns parsed JSON or None on error.
-    Retries RETRY_ATTEMPTS times with simple backoff.
-    """
     url = build_trpc_url(endpoint, params)
     sess = await get_session()
     last_exc = None
@@ -59,9 +66,7 @@ async def api_call(endpoint: str, params: Optional[Dict] = None) -> Optional[Any
                     last_exc = Exception(f"HTTP {resp.status}: {text[:400]}")
                     await asyncio.sleep(RETRY_BACKOFF * (2 ** attempt))
                     continue
-                # parse JSON
                 data = json.loads(text)
-                # unwrap common tRPC envelope if present
                 if isinstance(data, dict):
                     if 'result' in data and isinstance(data['result'], dict) and 'data' in data['result']:
                         return data['result']['data']
@@ -71,244 +76,313 @@ async def api_call(endpoint: str, params: Optional[Dict] = None) -> Optional[Any
         except Exception as e:
             last_exc = e
             await asyncio.sleep(RETRY_BACKOFF * (2 ** attempt))
-    # final failure
-    print(f"[api_call] failed {endpoint} params={params} : {last_exc}")
+    print(f"[api_call] failed {endpoint} params={params}: {last_exc}")
     return None
 
-# ---------- Helper: Embed formatting ----------
-MAX_FIELD_CHARS = 1000
-def safe_truncate(s: str, n: int) -> str:
-    return s if len(s) <= n else s[: n - 3] + "..."
+# ---------- Embeds + pagination ----------
+MAX_DESC_CHARS = 2048
+MAX_FIELD_CHARS = 1024
 
-def make_embed(title: str, description: str = "", color: discord.Color = discord.Color.blurple()) -> discord.Embed:
-    e = discord.Embed(title=title, description=safe_truncate(description, 2048), timestamp=datetime.utcnow(), color=color)
+def safe_truncate(s: str, limit: int) -> str:
+    if len(s) <= limit:
+        return s
+    return s[: limit - 3] + "..."
+
+def make_embed(title: str, description: Optional[str] = None, color: discord.Color = discord.Color.blurple()) -> discord.Embed:
+    desc = safe_truncate(description, MAX_DESC_CHARS) if description else None
+    e = discord.Embed(title=title, description=desc, timestamp=datetime.utcnow(), color=color)
     return e
 
-def add_dict_fields(embed: discord.Embed, d: Dict[str, Any], limit: int = 10):
+def add_small_fields(embed: discord.Embed, d: Dict[str, Any], limit: int = 10):
     added = 0
     for k, v in d.items():
         if added >= limit:
             break
-        text = v if isinstance(v, (str, int, float)) else json.dumps(v, default=str)
-        embed.add_field(name=str(k), value=safe_truncate(str(text), MAX_FIELD_CHARS), inline=True)
+        vs = v if isinstance(v, (str, int, float)) else json.dumps(v, default=str)
+        embed.add_field(name=str(k), value=safe_truncate(str(vs), MAX_FIELD_CHARS), inline=True)
         added += 1
     if len(d) > limit:
-        embed.add_field(name="…", value=f"+{len(d)-limit} more fields", inline=False)
+        embed.add_field(name="…", value=f"+{len(d)-limit} more", inline=False)
 
-# ---------- Dashboard management (in-memory while running) ----------
-# Dashboard structure: name -> dict(channel_id, message_id, endpoint, params, interval, task)
-dashboards: Dict[str, Dict[str, Any]] = {}
+# Pagination view
+class PageView(View):
+    def __init__(self, pages: List[discord.Embed], *, timeout: int = 120):
+        super().__init__(timeout=timeout)
+        self.pages = pages
+        self.current = 0
+        self.max = len(pages)
+        self.message: Optional[discord.Message] = None
+        # Buttons
+        self.prev = Button(label="<<", style=discord.ButtonStyle.secondary)
+        self.next = Button(label=">>", style=discord.ButtonStyle.secondary)
+        self.add_item(self.prev)
+        self.add_item(self.next)
+        self.prev.callback = self.on_prev
+        self.next.callback = self.on_next
+        self._update_button_states()
 
-async def _render_endpoint_to_embed(endpoint: str, params: Optional[Dict]) -> discord.Embed:
-    """Call endpoint and produce a human-friendly embed"""
+    def _update_button_states(self):
+        self.prev.disabled = (self.current <= 0)
+        self.next.disabled = (self.current >= self.max - 1)
+
+    async def on_prev(self, interaction: discord.Interaction):
+        if self.current > 0:
+            self.current -= 1
+            await interaction.response.edit_message(embed=self.pages[self.current], view=self)
+            self._update_button_states()
+
+    async def on_next(self, interaction: discord.Interaction):
+        if self.current < self.max - 1:
+            self.current += 1
+            await interaction.response.edit_message(embed=self.pages[self.current], view=self)
+            self._update_button_states()
+
+# Render endpoint to embed pages
+async def render_to_pages(endpoint: str, params: Optional[Dict] = None) -> List[discord.Embed]:
     data = await api_call(endpoint, params)
     title = f"📡 {endpoint}"
     if params:
-        title += f" {json.dumps(params, separators=(',',':'))}"
+        title += " " + json.dumps(params, separators=(",", ":"))
     if data is None:
-        return make_embed(title, "❌ Failed to fetch data", discord.Color.red())
-    # Build embed based on type
-    emb = make_embed(title, "", discord.Color.blue())
-    # If it's a dict with common keys, try to present them
+        return [make_embed(title, "❌ Failed to fetch data", discord.Color.red())]
+
+    # If dict with list-like key
     if isinstance(data, dict):
-        # If top-level contains items/rankings/results, show summary and sample
-        for key in ('items','rankings','results','data','battles','companies','transactions','items'):
+        for key in ('items','rankings','results','battles','companies','transactions','offers','data','mUs'):
             if key in data and isinstance(data[key], list):
-                emb.add_field(name=f"{key} (count)", value=str(len(data[key])), inline=False)
-                # show first few
-                for i, item in enumerate(data[key][:6], 1):
-                    if isinstance(item, dict):
-                        # pick name-like fields
-                        name = item.get('name') or item.get('title') or item.get('username') or item.get('id') or str(i)
-                        summary = []
-                        for s in ('id','country','damage','score','price','status','region'):
-                            if s in item:
-                                summary.append(f"{s}:{item[s]}")
-                        emb.add_field(name=f"{i}. {name}", value=safe_truncate(", ".join(summary) or json.dumps(item, default=str)[:200], 1000), inline=False)
-                return emb
-        # Otherwise, list top-level small fields
+                lst = data[key]
+                return pages_from_list(lst, title, key)
+        # else, plain dict: just one page
+        e = make_embed(title, "")
         small = {}
         for k, v in data.items():
             if isinstance(v, (str, int, float)):
                 small[k] = v
             elif isinstance(v, (list, dict)):
-                small[k] = f"{type(v).__name__} ({len(v) if hasattr(v, '__len__') else 'x'})"
+                small[k] = f"{type(v).__name__}({len(v)})"
             else:
                 small[k] = str(v)
-        add_dict_fields(emb, small, limit=10)
-        return emb
-    # If list, show some items
-    if isinstance(data, list):
-        emb.add_field(name="Count", value=str(len(data)), inline=False)
-        for i, it in enumerate(data[:6], 1):
-            if isinstance(it, dict):
-                name = it.get('id') or it.get('name') or str(i)
-                emb.add_field(name=f"{i}. {name}", value=safe_truncate(json.dumps(it, default=str), 800), inline=False)
-            else:
-                emb.add_field(name=f"{i}", value=safe_truncate(str(it), 800), inline=False)
-        return emb
-    # fallback: present as text
-    emb.add_field(name="Result", value=safe_truncate(json.dumps(data, default=str), 1024), inline=False)
-    return emb
+        add_small_fields(e, small, limit=10)
+        return [e]
 
-async def _dashboard_runner(name: str):
-    """Background task to refresh a dashboard by editing the message."""
+    if isinstance(data, list):
+        return pages_from_list(data, title, None)
+
+    # fallback
+    return [make_embed(title, safe_truncate(json.dumps(data, default=str), 1024))]
+
+def pages_from_list(lst: List[Any], title: str, list_key: Optional[str]) -> List[discord.Embed]:
+    pages: List[discord.Embed] = []
+    # split into chunks
+    for i in range(0, len(lst), PAGE_SIZE):
+        sub = lst[i : i + PAGE_SIZE]
+        e = make_embed(title, f"Showing {i+1}-{i+len(sub)} of {len(lst)}")
+        for j, item in enumerate(sub, 1):
+            if isinstance(item, dict):
+                name = item.get('name') or item.get('id') or f"{j}"
+                # build summary
+                summary_parts = []
+                for k in ('id','country','damage','score','price','status','region','title','username'):
+                    if k in item:
+                        summary_parts.append(f"{k}:{item[k]}")
+                summ = ", ".join(summary_parts) if summary_parts else json.dumps(item, default=str)[:80]
+                e.add_field(name=f"{i+j}. {name}", value=safe_truncate(summ, 200), inline=False)
+            else:
+                e.add_field(name=f"{i+j}", value=safe_truncate(str(item), 200), inline=False)
+        pages.append(e)
+    if not pages:
+        pages.append(make_embed(title, "No data"))
+    return pages
+
+# ---------- Dashboard (auto-refresh) ----------
+dashboards: Dict[str, Dict[str, Any]] = {}
+# structure: name -> {
+#   channel_id, message_id, endpoint, params, interval, running, task
+# }
+
+async def dashboard_task(name: str):
     cfg = dashboards.get(name)
     if not cfg:
         return
-    interval = cfg.get("interval", DEFAULT_DASHBOARD_INTERVAL)
+    interval = cfg.get("interval", DEFAULT_DASH_INTERVAL)
     channel_id = cfg["channel_id"]
     message_id = cfg["message_id"]
     endpoint = cfg["endpoint"]
     params = cfg.get("params")
-    while dashboards.get(name) and dashboards[name].get("running", False):
+    while dashboards.get(name) and cfg.get("running", False):
         try:
-            channel = bot.get_channel(channel_id)
-            if channel is None:
-                print(f"[dashboard:{name}] channel not found ({channel_id}), stopping")
-                dashboards[name]["running"] = False
+            ch = bot.get_channel(channel_id)
+            if ch is None:
+                print(f"[dashboard:{name}] channel missing, stopping.")
                 break
-            embed = await _render_endpoint_to_embed(endpoint, params)
+            pages = await render_to_pages(endpoint, params)
+            # pick first page initially, then cycle?
+            embed = pages[0]
             try:
-                msg = await channel.fetch_message(message_id)
-                await msg.edit(embed=embed)
+                msg = await ch.fetch_message(message_id)
+                await msg.edit(embed=embed, view=View())  # view cleared, but we care only embed
             except discord.NotFound:
-                # message removed - stop dashboard
-                print(f"[dashboard:{name}] message {message_id} not found, stopping")
-                dashboards[name]["running"] = False
-                break
-            except discord.Forbidden:
-                print(f"[dashboard:{name}] missing permissions to edit message")
-                dashboards[name]["running"] = False
+                print(f"[dashboard:{name}] message not found, stopping.")
                 break
             except Exception as e:
                 print(f"[dashboard:{name}] edit error: {e}")
         except Exception as e:
-            print(f"[dashboard:{name}] runner error: {e}")
+            print(f"[dashboard:{name}] error: {e}")
         await asyncio.sleep(interval)
 
 # ---------- Commands ----------
 @bot.event
 async def on_ready():
-    print(f"{bot.user} connected. WarEra API base: {API_BASE}")
+    print(f"{bot.user} connected (v3). API base: {API_BASE}")
 
 @bot.command()
 async def help(ctx):
-    embed = discord.Embed(title="WarEra Bot — Commands", color=discord.Color.blue())
+    embed = discord.Embed(title="WarEra Bot v3 — Commands", color=discord.Color.blue())
     rows = [
-        ("!prices", "Show item prices (itemTrading.getPrices)"),
-        ("!battles", "List active battles (battle.getBattles)"),
-        ("!wars", "War snapshot (battle.getBattles + helpers)"),
-        ("!econ", "Economy snapshot (prices + top orders)"),
-        ("!rankings [type]", "Rankings (ranking.getRanking)"),
-        ("!countries", "List countries (country.getAllCountries)"),
-        ("!user <id>", "Get user (user.getUserLite)"),
-        ("!company <id>", "Get company (company.getById)"),
-        ("!call <endpoint> [json_params]", "Call any endpoint (tRPC) — params as JSON"),
-        ("!dashboard create <name> <endpoint> [json_params] [interval]", "Create dashboard that edits one message"),
+        ("!prices", "Show item prices"),
+        ("!battles", "List active battles"),
+        ("!wars", "World war snapshot"),
+        ("!econ", "Economy snapshot (prices & orders)"),
+        ("!rankings [type]", "Ranking list"),
+        ("!countries", "All countries list"),
+        ("!user <id>", "Get user data"),
+        ("!company <id>", "Get company data"),
+        ("!articles [page]", "List recent articles/news"),
+        ("!mus", "Military Units list"),
+        ("!offers", "Item offers / trading orders list"),
+        ("!call <endpoint> [json_params]", "Generic API call"),
+        ("!dashboard create <name> <endpoint> [json_params] [interval]", "Auto-refresh dashboard"),
         ("!dashboard list", "List dashboards"),
         ("!dashboard stop <name>", "Stop dashboard"),
-        ("!dashboard refresh <name>", "Force refresh dashboard now"),
+        ("!dashboard refresh <name>", "Force refresh dashboard"),
     ]
     for c, d in rows:
         embed.add_field(name=c, value=d, inline=False)
     await ctx.send(embed=embed)
 
-# Basic helpers
 @bot.command()
 async def prices(ctx):
-    await ctx.send("💰 Fetching prices...")
-    data = await api_call("itemTrading.getPrices", None)
-    emb = await _render_endpoint_to_embed("itemTrading.getPrices", None)
-    await ctx.send(embed=emb)
+    await ctx.send("💰 Fetching prices …")
+    pages = await render_to_pages("itemTrading.getPrices", None)
+    view = PageView(pages)
+    msg = await ctx.send(embed=pages[0], view=view)
+    view.message = msg
 
 @bot.command()
 async def battles(ctx):
-    await ctx.send("⚔️ Fetching battles...")
-    emb = await _render_endpoint_to_embed("battle.getBattles", None)
-    await ctx.send(embed=emb)
+    await ctx.send("⚔️ Fetching battles …")
+    pages = await render_to_pages("battle.getBattles", None)
+    view = PageView(pages)
+    msg = await ctx.send(embed=pages[0], view=view)
+    view.message = msg
 
 @bot.command()
 async def wars(ctx):
-    await ctx.send("⚔️ Fetching war snapshot...")
-    emb = await _render_endpoint_to_embed("battle.getBattles", None)
-    await ctx.send(embed=emb)
+    # can combine battle + liveBattle for a richer snapshot; for now battle list
+    await ctx.send("🌐 Fetching wars snapshot …")
+    pages = await render_to_pages("battle.getBattles", None)
+    view = PageView(pages)
+    msg = await ctx.send(embed=pages[0], view=view)
+    view.message = msg
 
 @bot.command()
 async def econ(ctx):
-    await ctx.send("💹 Fetching economy snapshot...")
-    # compose an embed combining prices and top orders
+    await ctx.send("💹 Fetching economy snapshot …")
+    # embed combining prices and top orders
     prices = await api_call("itemTrading.getPrices", None)
-    orders = await api_call("tradingOrder.getTopOrders", {"itemType": "FOOD"})
-    emb = make_embed("💹 Economy Snapshot")
+    top = await api_call("tradingOrder.getTopOrders", {"itemType": "FOOD"})
+    title = "💹 Economy Snapshot"
+    emb = make_embed(title)
     if isinstance(prices, dict):
-        sample = {k: prices[k] for k in list(prices.keys())[:10] if isinstance(prices[k], (int, float))}
+        sample = {k: prices[k] for k in list(prices.keys())[:6] if isinstance(prices[k], (int, float))}
         if sample:
-            add_dict_fields(emb, sample, limit=8)
-    if isinstance(orders, list):
-        emb.add_field(name="Top Orders (sample)", value=safe_truncate(json.dumps(orders[:6], default=str), 1000), inline=False)
+            add_small_fields(emb, sample, limit=6)
+    if isinstance(top, list):
+        # show first few orders
+        text = ""
+        for o in top[:6]:
+            text += json.dumps(o, default=str) + "\n"
+        emb.add_field(name="Top Orders (sample)", value=safe_truncate(text, 1000), inline=False)
     await ctx.send(embed=emb)
 
 @bot.command()
 async def rankings(ctx, ranking_type: str = "weeklyCountryDamages"):
-    await ctx.send(f"🏆 Fetching {ranking_type}...")
-    emb = await _render_endpoint_to_embed("ranking.getRanking", {"rankingType": ranking_type})
-    await ctx.send(embed=emb)
+    await ctx.send(f"🏆 Fetching rankings ({ranking_type}) …")
+    pages = await render_to_pages("ranking.getRanking", {"rankingType": ranking_type})
+    view = PageView(pages)
+    msg = await ctx.send(embed=pages[0], view=view)
+    view.message = msg
 
 @bot.command()
 async def countries(ctx):
-    await ctx.send("🌍 Fetching countries...")
-    emb = await _render_endpoint_to_embed("country.getAllCountries", None)
-    await ctx.send(embed=emb)
+    await ctx.send("🌍 Fetching countries …")
+    pages = await render_to_pages("country.getAllCountries", None)
+    view = PageView(pages)
+    msg = await ctx.send(embed=pages[0], view=view)
+    view.message = msg
 
 @bot.command()
 async def user(ctx, user_id: int):
-    if not user_id:
-        await ctx.send("Usage: `!user <id>`")
-        return
-    await ctx.send(f"🔎 Fetching user {user_id}...")
-    emb = await _render_endpoint_to_embed("user.getUserLite", {"userId": user_id})
-    await ctx.send(embed=emb)
+    await ctx.send(f"🔍 Fetching user {user_id} …")
+    pages = await render_to_pages("user.getUserLite", {"userId": user_id})
+    view = PageView(pages)
+    msg = await ctx.send(embed=pages[0], view=view)
+    view.message = msg
 
 @bot.command()
-async def company(ctx, company_id: int):
-    if not company_id:
-        await ctx.send("Usage: `!company <id>`")
-        return
-    await ctx.send(f"🏢 Fetching company {company_id}...")
-    emb = await _render_endpoint_to_embed("company.getById", {"companyId": company_id})
-    await ctx.send(embed=emb)
+async def company(ctx, comp_id: int):
+    await ctx.send(f"🏢 Fetching company {comp_id} …")
+    pages = await render_to_pages("company.getById", {"companyId": comp_id})
+    view = PageView(pages)
+    msg = await ctx.send(embed=pages[0], view=view)
+    view.message = msg
+
+@bot.command()
+async def articles(ctx, page: int = 1):
+    await ctx.send("📰 Fetching recent articles …")
+    pages = await render_to_pages("article.getArticlesPaginated", {"page": page, "limit": PAGE_SIZE})
+    view = PageView(pages)
+    msg = await ctx.send(embed=pages[0], view=view)
+    view.message = msg
+
+@bot.command()
+async def mus(ctx):
+    await ctx.send("🎖️ Fetching military units …")
+    pages = await render_to_pages("mu.getManyPaginated", {"page": 1, "limit": PAGE_SIZE})
+    view = PageView(pages)
+    msg = await ctx.send(embed=pages[0], view=view)
+    view.message = msg
+
+@bot.command()
+async def offers(ctx):
+    await ctx.send("📦 Fetching trading offers/orders …")
+    pages = await render_to_pages("itemOffer.getPaginatedItemOffers", {"page": 1, "limit": PAGE_SIZE})
+    view = PageView(pages)
+    msg = await ctx.send(embed=pages[0], view=view)
+    view.message = msg
 
 @bot.command()
 async def call(ctx, endpoint: str, *, params_json: str = None):
-    """
-    Generic call: !call endpoint {"key":1}
-    Example: !call ranking.getRanking {"rankingType":"weeklyCountryDamages"}
-    """
     params = None
     if params_json:
         try:
             params = json.loads(params_json)
         except Exception:
-            await ctx.send("❌ Invalid JSON for params")
+            await ctx.send("❌ Invalid JSON")
             return
     await ctx.send(f"📡 Calling `{endpoint}` …")
-    emb = await _render_endpoint_to_embed(endpoint, params)
-    await ctx.send(embed=emb)
+    pages = await render_to_pages(endpoint, params)
+    view = PageView(pages)
+    msg = await ctx.send(embed=pages[0], view=view)
+    view.message = msg
 
-# Dashboard commands
 @bot.group()
 async def dashboard(ctx):
     if ctx.invoked_subcommand is None:
-        await ctx.send("Use subcommands: create, list, stop, refresh")
+        await ctx.send("Use: create / list / stop / refresh")
 
 @dashboard.command(name="create")
-async def dashboard_create(ctx, name: str, endpoint: str, params_json: str = None, interval: int = DEFAULT_DASHBOARD_INTERVAL):
-    """
-    Create a dashboard message that the bot will edit periodically.
-    Example: !dashboard create econ itemTrading.getPrices 60
-    Or: !dashboard create ranks ranking.getRanking '{"rankingType":"weeklyCountryDamages"}' 30
-    """
+async def dashboard_create(ctx, name: str, endpoint: str, params_json: str = None, interval: int = DEFAULT_DASH_INTERVAL):
     if name in dashboards:
         await ctx.send(f"❌ Dashboard `{name}` already exists.")
         return
@@ -317,16 +391,11 @@ async def dashboard_create(ctx, name: str, endpoint: str, params_json: str = Non
         try:
             params = json.loads(params_json)
         except Exception:
-            await ctx.send("❌ params_json invalid JSON")
+            await ctx.send("❌ Invalid JSON for params")
             return
-    # create initial embed
-    emb = await _render_endpoint_to_embed(endpoint, params)
-    try:
-        msg = await ctx.send(embed=emb)
-    except discord.Forbidden:
-        await ctx.send("❌ Missing permission to send messages in this channel.")
-        return
-    # store dashboard
+    pages = await render_to_pages(endpoint, params)
+    view = PageView(pages)
+    msg = await ctx.send(embed=pages[0], view=view)
     dashboards[name] = {
         "channel_id": ctx.channel.id,
         "message_id": msg.id,
@@ -334,72 +403,69 @@ async def dashboard_create(ctx, name: str, endpoint: str, params_json: str = Non
         "params": params,
         "interval": interval,
         "running": True,
-        "task": None
+        "task": asyncio.create_task(dashboard_task(name))
     }
-    # spawn runner
-    dashboards[name]["task"] = asyncio.create_task(_dashboard_runner(name))
-    await ctx.send(f"✅ Dashboard `{name}` created and will refresh every {interval}s (editing one message).")
+    await ctx.send(f"✅ Dashboard `{name}` created (refresh every {interval}s)")
 
 @dashboard.command(name="list")
 async def dashboard_list(ctx):
     if not dashboards:
-        await ctx.send("No dashboards running.")
+        await ctx.send("No dashboards.")
         return
-    embed = discord.Embed(title="Dashboards (in-memory)", color=discord.Color.green())
+    embed = discord.Embed(title="Dashboards", color=discord.Color.green())
     for name, cfg in dashboards.items():
         ch = bot.get_channel(cfg["channel_id"])
-        msg_link = f"https://discord.com/channels/{ctx.guild.id}/{cfg['channel_id']}/{cfg['message_id']}" if ctx.guild else "link-unavailable"
-        embed.add_field(name=name, value=f"endpoint: `{cfg['endpoint']}`\nchannel: {ch.mention if ch else cfg['channel_id']}\ninterval: {cfg['interval']}s\nrunning: {cfg['running']}\n[message]({msg_link})", inline=False)
+        embed.add_field(name=name,
+                        value=f"endpoint: `{cfg['endpoint']}`\nchannel: {ch.mention if ch else cfg['channel_id']}\ninterval: {cfg['interval']}s\nrunning: {cfg['running']}\nmessage_id: {cfg['message_id']}",
+                        inline=False)
     await ctx.send(embed=embed)
 
 @dashboard.command(name="stop")
 async def dashboard_stop(ctx, name: str):
     cfg = dashboards.get(name)
     if not cfg:
-        await ctx.send(f"❌ No dashboard named `{name}`")
+        await ctx.send(f"❌ Dashboard `{name}` not found")
         return
     cfg["running"] = False
-    # cancel task if exists
     t = cfg.get("task")
     if t:
         t.cancel()
     dashboards.pop(name, None)
-    await ctx.send(f"🛑 Dashboard `{name}` stopped and removed from memory (while running).")
+    await ctx.send(f"🛑 Dashboard `{name}` stopped")
 
 @dashboard.command(name="refresh")
 async def dashboard_refresh(ctx, name: str):
     cfg = dashboards.get(name)
     if not cfg:
-        await ctx.send(f"❌ No dashboard named `{name}`")
+        await ctx.send(f"❌ Dashboard `{name}` not found")
         return
-    # force immediate render+edit
-    channel = bot.get_channel(cfg["channel_id"])
-    if channel is None:
-        await ctx.send("❌ Dashboard channel not found")
+    ch = bot.get_channel(cfg["channel_id"])
+    if ch is None:
+        await ctx.send("❌ Channel not found")
         return
     try:
-        msg = await channel.fetch_message(cfg["message_id"])
+        msg = await ch.fetch_message(cfg["message_id"])
     except Exception:
-        await ctx.send("❌ Dashboard message not found")
+        await ctx.send("❌ Message not found")
         return
-    emb = await _render_endpoint_to_embed(cfg["endpoint"], cfg.get("params"))
-    await msg.edit(embed=emb)
-    await ctx.send(f"🔄 Dashboard `{name}` refreshed.")
+    pages = await render_to_pages(cfg["endpoint"], cfg.get("params"))
+    view = PageView(pages)
+    await msg.edit(embed=pages[0], view=view)
+    await ctx.send(f"🔄 Dashboard `{name}` refreshed")
 
-# ---------- Graceful shutdown ----------
 @bot.command()
 @commands.is_owner()
 async def shutdown(ctx):
-    await ctx.send("Shutting down...")
-    await get_session()  # ensure session created
-    if _session and not _session.closed:
-        await _session.close()
+    await ctx.send("Shutting down …")
+    sess = await get_session()
+    if sess and not sess.closed:
+        await sess.close()
     await bot.close()
 
 # ---------- Run ----------
 if __name__ == "__main__":
-    TOKEN = os.getenv("DISCORD_BOT_TOKEN", "YOUR_BOT_TOKEN_HERE")
-    if TOKEN == "YOUR_BOT_TOKEN_HERE":
-        print("⚠️ Set DISCORD_BOT_TOKEN environment variable before running.")
+    TOKEN = os.getenv("DISCORD_BOT_TOKEN", "YOUR_TOKEN_HERE")
+    if TOKEN == "YOUR_TOKEN_HERE":
+        print("⚠️ Set DISCORD_BOT_TOKEN environment variable")
     else:
         bot.run(TOKEN)
