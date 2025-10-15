@@ -280,7 +280,7 @@ def link_for_entity(item: Dict[str,Any]) -> Tuple[str, Optional[str], str]:
     return (safe_truncate(name,40), extract_avatar(item), ICON_USER)
 
 # ---------------- Make multi-item embed (10 per page) ----------------
-def make_multi_item_embed(items_batch: List[Tuple[int, Dict]], total: int, page_num: int, total_pages: int, title: str, icon: str) -> discord.Embed:
+def make_item_embed(items_batch: List[Tuple[int, Dict]], total: int, page_num: int, total_pages: int, title: str, icon: str) -> discord.Embed:
     """Create an embed with up to 10 items per page"""
     emb = discord.Embed(
         title=f"{icon} {title}",
