@@ -1,4 +1,4 @@
-"""
+def process_items_list(items: List, title: str) -> Tuple[List[discord.Embed], List[str]"""
 WarEra Enhanced Bot — Comprehensive API Coverage
 All endpoints from https://api2.warera.io/docs/# with beautiful formatting
 """
@@ -210,9 +210,7 @@ def link_for_entity(item: Dict[str,Any]) -> Tuple[str, Optional[str], str]:
     """
     Returns (name_with_link, avatar_url, icon_emoji)
     """
-    icon = get_entity_icon(item)
-    
-    # nested user object
+    # nested user object (highest priority)
     if isinstance(item.get("user"), dict):
         u = item["user"]
         uid = u.get("_id") or u.get("id")
@@ -220,11 +218,17 @@ def link_for_entity(item: Dict[str,Any]) -> Tuple[str, Optional[str], str]:
         if uid:
             return (f"[{safe_truncate(name,40)}]({URLS['user']}{uid})", extract_avatar(u), ICON_USER)
     
-    # direct user id
+    # direct user id with name in item
     if item.get("user") and is_likely_id(item.get("user")):
         uid = item.get("user")
         name = item.get("name") or item.get("username") or uid
         return (f"[{safe_truncate(name,40)}]({URLS['user']}{uid})", extract_avatar(item), ICON_USER)
+    
+    # country (check before general _id)
+    cc = item.get("countryId") or item.get("country") or (item.get("_id") if item.get("name") and "population" in item else None)
+    if cc and not item.get("companyId"):
+        name = item.get("name") or item.get("countryName") or cc
+        return (f"[{safe_truncate(name,40)}]({URLS['country']}{cc})", extract_avatar(item), ICON_COUNTRY)
     
     # company
     cid = item.get("companyId") or item.get("company")
@@ -232,15 +236,9 @@ def link_for_entity(item: Dict[str,Any]) -> Tuple[str, Optional[str], str]:
         name = item.get("name") or item.get("title") or cid
         return (f"[{safe_truncate(name,40)}]({URLS['company']}{cid})", extract_avatar(item), ICON_COMPANY)
     
-    # country
-    cc = item.get("countryId") or item.get("country")
-    if cc:
-        name = item.get("name") or item.get("countryName") or cc
-        return (f"[{safe_truncate(name,40)}]({URLS['country']}{cc})", extract_avatar(item), ICON_COUNTRY)
-    
     # region
     rid = item.get("regionId") or item.get("region")
-    if rid:
+    if rid and is_likely_id(rid):
         name = item.get("name") or item.get("regionName") or rid
         return (f"[{safe_truncate(name,40)}]({URLS['region']}{rid})", extract_avatar(item), ICON_REGION)
     
@@ -253,32 +251,33 @@ def link_for_entity(item: Dict[str,Any]) -> Tuple[str, Optional[str], str]:
     
     # party
     pid = item.get("partyId") or item.get("party")
-    if pid:
+    if pid and is_likely_id(pid):
         name = item.get("name") or item.get("partyName") or pid
         return (f"[{safe_truncate(name,40)}]({URLS['party']}{pid})", extract_avatar(item), ICON_PARTY)
     
     # battle
-    if item.get("battleId") or (item.get("_id") and "attacker" in item):
+    if item.get("battleId") or (item.get("_id") and ("attacker" in item or "defender" in item)):
         bid = item.get("battleId") or item.get("_id") or item.get("id")
         name = item.get("title") or bid
         if bid:
             return (f"[{safe_truncate(name,40)}]({URLS['battle']}{bid})", extract_avatar(item), ICON_BATTLE)
     
-    # article
-    aid = item.get("articleId") or item.get("_id")
-    if aid and is_likely_id(aid):
-        name = item.get("title") or item.get("name") or aid
+    # article (check for title field)
+    if item.get("title") and item.get("_id") and is_likely_id(item.get("_id")) and "content" in item:
+        aid = item.get("_id")
+        name = item.get("title")
         return (f"[{safe_truncate(name,40)}]({URLS['article']}{aid})", extract_avatar(item), ICON_ARTICLE)
     
-    # fallback: if _id looks like user id
+    # fallback: generic _id
     mid = item.get("_id") or item.get("id")
     if is_likely_id(mid):
         name = item.get("name") or item.get("title") or mid
+        icon = get_entity_icon(item)
         return (f"[{safe_truncate(name,40)}]({URLS['user']}{mid})", extract_avatar(item), icon)
     
     # final fallback
     name = item.get("name") or item.get("title") or str(mid)
-    return (safe_truncate(name,40), extract_avatar(item), icon)
+    return (safe_truncate(name,40), extract_avatar(item), ICON_USER)
 
 # ---------------- Make per-item embed ----------------
 def make_item_embed(idx:int, total:int, name_markup:str, avatar:Optional[str], value_str:str, tier:Optional[str], endpoint_title:str, icon:str=ICON_DAMAGE, color:discord.Color=None) -> discord.Embed:
@@ -338,20 +337,30 @@ def process_items_list(items: List, title: str) -> Tuple[List[discord.Embed], Li
         if isinstance(it, dict):
             name_link, avatar, icon = link_for_entity(it)
             
-            # Try to extract value
+            # Try to extract value with proper priority
             val = (it.get("value") or it.get("damage") or it.get("score") or 
-                   it.get("wealth") or it.get("price") or it.get("population") or 
-                   it.get("gdp") or it.get("treasury") or 0)
+                   it.get("wealth") or it.get("gdp") or it.get("treasury") or 
+                   it.get("population") or it.get("price") or 0)
             val_s = fmt_num(val)
             
-            # Try to extract tier/rank
-            tier = it.get("tier") or it.get("rank") or it.get("title") or it.get("level")
+            # Try to extract tier/rank/additional info
+            tier_parts = []
+            if it.get("tier"): 
+                tier_parts.append(str(it.get("tier")))
+            if it.get("rank"): 
+                tier_parts.append(f"Rank: {it.get('rank')}")
+            if it.get("level"): 
+                tier_parts.append(f"Level: {it.get('level')}")
+            if it.get("population") and "population" not in str(val):
+                tier_parts.append(f"Pop: {fmt_num(it.get('population'))}")
+            
+            tier = " | ".join(tier_parts) if tier_parts else None
             
             emb = make_item_embed(idx, total, name_link, avatar, val_s, tier, title, icon)
             game_pages.append(emb)
             dev_json.append(json.dumps(it, default=str))
         else:
-            emb = discord.Embed(title=f"#{idx}", description=safe_truncate(str(it),1000), timestamp=now_utc())
+            emb = discord.Embed(title=f"#{idx}", description=safe_truncate(str(it), 1000), timestamp=now_utc())
             game_pages.append(emb)
             dev_json.append(json.dumps(it, default=str))
     
@@ -475,57 +484,81 @@ async def send_endpoint_pages(interaction: discord.Interaction, endpoint: str, p
 @tree.command(name="help", description="📖 Show all available commands")
 async def help_cmd(interaction: discord.Interaction):
     await safe_defer(interaction)
-    e = discord.Embed(title="🎮 WarEra Bot — Command Guide", color=discord.Color.gold(), timestamp=now_utc())
-    e.description = "Comprehensive WarEra game data at your fingertips!"
+    e = discord.Embed(
+        title="🎮 WarEra Bot — Command Guide", 
+        color=discord.Color.gold(), 
+        timestamp=now_utc()
+    )
+    e.description = "Comprehensive WarEra game data at your fingertips!\n*Use slash commands: type `/` to see all*"
     
     # Rankings
-    e.add_field(name="📊 Rankings", value=(
-        "`/rankings` - View all ranking types\n"
-        "`/topdamage` - Top damage dealers\n"
-        "`/topwealth` - Wealthiest players\n"
-        "`/topland` - Top land producers\n"
-        "`/toplevel` - Highest level players\n"
-        "`/topreferrals` - Top referrers"
-    ), inline=False)
+    e.add_field(
+        name=f"{ICON_DAMAGE} Rankings & Leaderboards", 
+        value=(
+            f"`/rankings` → All ranking types\n"
+            f"`/topdamage` → {ICON_DAMAGE} Top damage dealers\n"
+            f"`/topwealth` → {ICON_WEALTH} Wealthiest players\n"
+            f"`/topland` → {ICON_GROUND} Top land producers\n"
+            f"`/toplevel` → {ICON_LEVEL} Highest level players\n"
+            f"`/topreferrals` → {ICON_REFERRAL} Top referrers"
+        ), 
+        inline=False
+    )
     
     # Countries
-    e.add_field(name="🌍 Countries", value=(
-        "`/countries` - List all countries\n"
-        "`/country <id>` - Country details\n"
-        "`/topcountries` - Top countries by GDP"
-    ), inline=False)
-    
-    # Regions
-    e.add_field(name="🏔️ Regions", value=(
-        "`/regions` - List all regions\n"
-        "`/region <id>` - Region details"
-    ), inline=False)
+    e.add_field(
+        name=f"{ICON_COUNTRY} Countries & Regions", 
+        value=(
+            f"`/countries` → List all countries\n"
+            f"`/country <id>` → Country details\n"
+            f"`/topcountries` → Top by GDP/Treasury\n"
+            f"`/regions` → List all regions\n"
+            f"`/region <id>` → Region details"
+        ), 
+        inline=False
+    )
     
     # Military
-    e.add_field(name="⚔️ Military", value=(
-        "`/battles` - Active battles\n"
-        "`/battle <id>` - Battle details\n"
-        "`/topmu` - Top military units"
-    ), inline=False)
+    e.add_field(
+        name=f"{ICON_BATTLE} Military & Combat", 
+        value=(
+            f"`/battles` → Active battles\n"
+            f"`/battle <id>` → Battle details\n"
+            f"`/topmu` → {ICON_MU} Top military units\n"
+            f"`/mu` → List military units\n"
+            f"`/mu_details <id>` → MU details"
+        ), 
+        inline=False
+    )
     
     # Economy
-    e.add_field(name="💰 Economy", value=(
-        "`/companies` - List companies\n"
-        "`/company <id>` - Company details\n"
-        "`/prices` - Item prices\n"
-        "`/transactions` - Recent transactions\n"
-        "`/workoffers` - Available jobs"
-    ), inline=False)
+    e.add_field(
+        name=f"{ICON_WEALTH} Economy & Business", 
+        value=(
+            f"`/companies` → List companies\n"
+            f"`/company <id>` → Company details\n"
+            f"`/prices` → {ICON_WEALTH} Item market prices\n"
+            f"`/transactions` → Recent transactions\n"
+            f"`/workoffers` → Available job offers"
+        ), 
+        inline=False
+    )
     
     # Other
-    e.add_field(name="🔧 Other", value=(
-        "`/user <id>` - User profile\n"
-        "`/articles` - Latest articles\n"
-        "`/search <query>` - Search anything\n"
-        "`/dashboard` - Live dashboard\n"
-        "`/jsondebug` - Format JSON"
-    ), inline=False)
+    e.add_field(
+        name=f"🔧 Other Commands", 
+        value=(
+            f"`/user <id>` → {ICON_USER} User profile\n"
+            f"`/articles` → {ICON_ARTICLE} Latest articles\n"
+            f"`/search <query>` → 🔍 Search anything\n"
+            f"`/dashboard` → 📊 Live dashboard\n"
+            f"`/alerts` → 🔔 Alert subscriptions\n"
+            f"`/jsondebug` → 🧪 Format JSON"
+        ), 
+        inline=False
+    )
     
+    e.set_footer(text="WarEra Bot | Powered by api2.warera.io")
     await interaction.followup.send(embed=e)
 
 # ==================== RANKING COMMANDS ====================
@@ -553,8 +586,11 @@ async def rankings_cmd(interaction: discord.Interaction, ranking_type: app_comma
     )
 
 # Aggregated rankings
-async def aggregate_users_from_ranking(ranking_type: str) -> List[Tuple[str, float]]:
-    sums: Dict[str,float] = {}
+async def aggregate_users_from_ranking(ranking_type: str) -> List[Tuple[str, float, Dict]]:
+    """Returns list of (user_id, value, user_data)"""
+    sums: Dict[str, float] = {}
+    user_data: Dict[str, Dict] = {}
+    
     data = await war_api.call("ranking.getRanking", {"rankingType": ranking_type})
     items = []
     if isinstance(data, dict) and isinstance(data.get("items"), list):
@@ -569,22 +605,41 @@ async def aggregate_users_from_ranking(ranking_type: str) -> List[Tuple[str, flo
             if uid is None: 
                 continue
             try: 
-                sums[str(uid)] = sums.get(str(uid),0.0) + float(val)
+                sums[str(uid)] = sums.get(str(uid), 0.0) + float(val)
+                if str(uid) not in user_data:
+                    user_data[str(uid)] = it
             except: 
                 pass
-    return sorted(sums.items(), key=lambda kv: kv[1], reverse=True)
+    
+    # Fetch names for top users
+    sorted_users = sorted(sums.items(), key=lambda kv: kv[1], reverse=True)
+    for idx, (uid, _) in enumerate(sorted_users[:100]):  # Fetch names for top 100
+        try:
+            r = await war_api.call("user.getUserLite", {"userId": uid})
+            if isinstance(r, dict):
+                user_data[uid]["name"] = r.get("name") or r.get("username")
+        except:
+            pass
+        if idx % 10 == 0:  # Small delay every 10 requests
+            await asyncio.sleep(0.1)
+    
+    return [(uid, val, user_data.get(uid, {})) for uid, val in sorted_users]
 
-def ranking_list_to_pages(title:str, ranked:List[Tuple[str,float]], names_map:Optional[Dict[str,str]]=None) -> Tuple[List[discord.Embed], List[str]]:
+def ranking_list_to_pages(title: str, ranked: List[Tuple[str, float, Dict]]) -> Tuple[List[discord.Embed], List[str]]:
     pages = []
     dev = []
     total = len(ranked)
     
-    for idx,(uid,val) in enumerate(ranked, start=1):
-        name = (names_map or {}).get(uid) or uid
-        name_markup = f"[{safe_truncate(name,40)}]({URLS['user']}{uid})" if uid else safe_truncate(str(name),40)
-        emb = make_item_embed(idx, total, name_markup, None, fmt_num(val), None, title, ICON_USER)
+    for idx, (uid, val, udata) in enumerate(ranked, start=1):
+        name = udata.get("name") or udata.get("username") or uid
+        name_markup = f"[{safe_truncate(name, 40)}]({URLS['user']}{uid})" if uid else safe_truncate(str(name), 40)
+        
+        # Get avatar from user data
+        avatar = extract_avatar(udata) if udata else None
+        
+        emb = make_item_embed(idx, total, name_markup, avatar, fmt_num(val), None, title, ICON_USER)
         pages.append(emb)
-        dev.append(json.dumps({"user":uid,"value":val}, default=str))
+        dev.append(json.dumps({"user": uid, "name": name, "value": val}, default=str))
         if idx >= 500: 
             break
     
@@ -597,15 +652,7 @@ def ranking_list_to_pages(title:str, ranked:List[Tuple[str,float]], names_map:Op
 async def topdamage_cmd(interaction: discord.Interaction):
     await safe_defer(interaction)
     ranked = await aggregate_users_from_ranking("userDamages")
-    names_map={}
-    for uid,_ in ranked[:50]:
-        try:
-            r = await war_api.call("user.getUserLite", {"userId":uid})
-            if isinstance(r, dict): 
-                names_map[uid] = r.get("name") or r.get("username") or uid
-        except: 
-            pass
-    pages, dev = ranking_list_to_pages(f"{ICON_DAMAGE} Top Damage Dealers", ranked[:500], names_map)
+    pages, dev = ranking_list_to_pages(f"{ICON_DAMAGE} Top Damage Dealers", ranked[:500])
     view = LeaderboardView(pages, dev)
     await interaction.followup.send(embed=pages[0], view=view)
 
@@ -613,15 +660,7 @@ async def topdamage_cmd(interaction: discord.Interaction):
 async def topwealth_cmd(interaction: discord.Interaction):
     await safe_defer(interaction)
     ranked = await aggregate_users_from_ranking("userWealth")
-    names_map={}
-    for uid,_ in ranked[:50]:
-        try:
-            r = await war_api.call("user.getUserLite", {"userId":uid})
-            if isinstance(r, dict): 
-                names_map[uid] = r.get("name") or r.get("username") or uid
-        except: 
-            pass
-    pages, dev = ranking_list_to_pages(f"{ICON_WEALTH} Top Wealth", ranked[:500], names_map)
+    pages, dev = ranking_list_to_pages(f"{ICON_WEALTH} Top Wealth", ranked[:500])
     view = LeaderboardView(pages, dev)
     await interaction.followup.send(embed=pages[0], view=view)
 
@@ -629,15 +668,7 @@ async def topwealth_cmd(interaction: discord.Interaction):
 async def topland_cmd(interaction: discord.Interaction):
     await safe_defer(interaction)
     ranked = await aggregate_users_from_ranking("userTerrain")
-    names_map={}
-    for uid,_ in ranked[:50]:
-        try:
-            r = await war_api.call("user.getUserLite", {"userId":uid})
-            if isinstance(r, dict): 
-                names_map[uid] = r.get("name") or r.get("username") or uid
-        except: 
-            pass
-    pages, dev = ranking_list_to_pages(f"{ICON_GROUND} Top Land Producers", ranked[:500], names_map)
+    pages, dev = ranking_list_to_pages(f"{ICON_GROUND} Top Land Producers", ranked[:500])
     view = LeaderboardView(pages, dev)
     await interaction.followup.send(embed=pages[0], view=view)
 
@@ -645,15 +676,7 @@ async def topland_cmd(interaction: discord.Interaction):
 async def toplevel_cmd(interaction: discord.Interaction):
     await safe_defer(interaction)
     ranked = await aggregate_users_from_ranking("userLevel")
-    names_map={}
-    for uid,_ in ranked[:50]:
-        try:
-            r = await war_api.call("user.getUserLite", {"userId":uid})
-            if isinstance(r, dict): 
-                names_map[uid] = r.get("name") or r.get("username") or uid
-        except: 
-            pass
-    pages, dev = ranking_list_to_pages(f"{ICON_LEVEL} Highest Levels", ranked[:500], names_map)
+    pages, dev = ranking_list_to_pages(f"{ICON_LEVEL} Highest Levels", ranked[:500])
     view = LeaderboardView(pages, dev)
     await interaction.followup.send(embed=pages[0], view=view)
 
@@ -661,15 +684,7 @@ async def toplevel_cmd(interaction: discord.Interaction):
 async def topreferrals_cmd(interaction: discord.Interaction):
     await safe_defer(interaction)
     ranked = await aggregate_users_from_ranking("userReferrals")
-    names_map={}
-    for uid,_ in ranked[:50]:
-        try:
-            r = await war_api.call("user.getUserLite", {"userId":uid})
-            if isinstance(r, dict): 
-                names_map[uid] = r.get("name") or r.get("username") or uid
-        except: 
-            pass
-    pages, dev = ranking_list_to_pages(f"{ICON_REFERRAL} Top Referrers", ranked[:500], names_map)
+    pages, dev = ranking_list_to_pages(f"{ICON_REFERRAL} Top Referrers", ranked[:500])
     view = LeaderboardView(pages, dev)
     await interaction.followup.send(embed=pages[0], view=view)
 
@@ -695,7 +710,7 @@ async def topcountries_cmd(interaction: discord.Interaction):
     elif isinstance(data, list):
         countries = data
     
-    # Score by GDP + treasury
+    # Score by GDP + treasury, filter out zeros
     scored = []
     for c in countries:
         if isinstance(c, dict):
@@ -703,7 +718,8 @@ async def topcountries_cmd(interaction: discord.Interaction):
             treasury = c.get("treasury") or 0
             try:
                 score = float(gdp) + float(treasury)
-                scored.append((c, score))
+                if score > 0:  # Only include countries with actual values
+                    scored.append((c, score))
             except:
                 pass
     
@@ -716,7 +732,7 @@ async def topcountries_cmd(interaction: discord.Interaction):
     for idx, (country, score) in enumerate(scored, start=1):
         name = country.get("name") or country.get("_id") or str(idx)
         cid = country.get("_id") or country.get("countryId")
-        link = f"[{safe_truncate(name,40)}]({URLS['country']}{cid})" if cid else safe_truncate(name,40)
+        link = f"[{safe_truncate(name, 40)}]({URLS['country']}{cid})" if cid else safe_truncate(name, 40)
         avatar = extract_avatar(country)
         
         gdp = fmt_num(country.get("gdp") or 0)
@@ -844,12 +860,35 @@ async def prices_cmd(interaction: discord.Interaction):
     await safe_defer(interaction)
     data = await war_api.call("itemTrading.getPrices")
     
-    e = discord.Embed(title="💰 Item Prices", color=discord.Color.gold(), timestamp=now_utc())
+    e = discord.Embed(title="💰 Item Market Prices", color=discord.Color.gold(), timestamp=now_utc())
+    e.description = "Current trading prices for all items"
     
     if isinstance(data, dict):
+        # Sort by price descending
         items = sorted(data.items(), key=lambda x: float(x[1]) if isinstance(x[1], (int, float)) else 0, reverse=True)
+        
+        # Item emojis
+        item_icons = {
+            "cocain": "💊", "cocaine": "💊",
+            "case1": "📦", "case": "📦",
+            "cookedFish": "🍣", "fish": "🐟",
+            "steak": "🥩", "livestock": "🐄",
+            "bread": "🍞", "grain": "🌾",
+            "steel": "⚙️", "iron": "⛏️",
+            "concrete": "🧱", "limestone": "🪨",
+            "oil": "🛢️", "petroleum": "⛽",
+            "ammo": "💣", "heavyAmmo": "💥", "lightAmmo": "🔫",
+            "lead": "🔩", "coca": "🌿"
+        }
+        
         for k, v in items[:25]:
-            e.add_field(name=safe_truncate(str(k), 30), value=fmt_num(v), inline=True)
+            icon = item_icons.get(k, "📊")
+            item_name = k.replace("_", " ").title()
+            e.add_field(
+                name=f"{icon} {safe_truncate(item_name, 20)}", 
+                value=f"**${fmt_num(v)}**", 
+                inline=True
+            )
     else:
         e.description = safe_truncate(str(data), 1000)
     
