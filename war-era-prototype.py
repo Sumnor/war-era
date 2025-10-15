@@ -359,6 +359,10 @@ def process_items_list(items: List, title: str) -> Tuple[List[discord.Embed], Li
             emb = make_item_embed(idx, total, name_link, avatar, val_s, tier, title, icon)
             game_pages.append(emb)
             dev_json.append(json.dumps(it, default=str))
+            
+            # Stop at reasonable limit for performance
+            if idx >= 1000:
+                break
         else:
             emb = discord.Embed(title=f"#{idx}", description=safe_truncate(str(it), 1000), timestamp=now_utc())
             game_pages.append(emb)
@@ -586,8 +590,8 @@ async def rankings_cmd(interaction: discord.Interaction, ranking_type: app_comma
     )
 
 # Aggregated rankings
-async def aggregate_users_from_ranking(ranking_type: str) -> List[Tuple[str, float, Dict]]:
-    """Returns list of (user_id, value, user_data)"""
+async def aggregate_users_from_ranking(ranking_type: str, limit: int = 10) -> List[Tuple[str, float, Dict]]:
+    """Returns list of (user_id, value, user_data). Limit controls how many to return."""
     sums: Dict[str, float] = {}
     user_data: Dict[str, Dict] = {}
     
@@ -611,19 +615,23 @@ async def aggregate_users_from_ranking(ranking_type: str) -> List[Tuple[str, flo
             except: 
                 pass
     
-    # Fetch names for top users
+    # Sort first
     sorted_users = sorted(sums.items(), key=lambda kv: kv[1], reverse=True)
-    for idx, (uid, _) in enumerate(sorted_users[:100]):  # Fetch names for top 100
+    
+    # Fetch names for requested amount
+    fetch_limit = min(limit, len(sorted_users))
+    for idx, (uid, _) in enumerate(sorted_users[:fetch_limit]):
         try:
             r = await war_api.call("user.getUserLite", {"userId": uid})
             if isinstance(r, dict):
                 user_data[uid]["name"] = r.get("name") or r.get("username")
+                user_data[uid]["avatarUrl"] = r.get("avatarUrl") or r.get("animatedAvatarUrl")
         except:
             pass
-        if idx % 10 == 0:  # Small delay every 10 requests
+        if idx % 10 == 0 and idx > 0:  # Small delay every 10 requests
             await asyncio.sleep(0.1)
     
-    return [(uid, val, user_data.get(uid, {})) for uid, val in sorted_users]
+    return [(uid, val, user_data.get(uid, {})) for uid, val in sorted_users[:limit]]
 
 def ranking_list_to_pages(title: str, ranked: List[Tuple[str, float, Dict]]) -> Tuple[List[discord.Embed], List[str]]:
     pages = []
@@ -640,8 +648,6 @@ def ranking_list_to_pages(title: str, ranked: List[Tuple[str, float, Dict]]) -> 
         emb = make_item_embed(idx, total, name_markup, avatar, fmt_num(val), None, title, ICON_USER)
         pages.append(emb)
         dev.append(json.dumps({"user": uid, "name": name, "value": val}, default=str))
-        if idx >= 500: 
-            break
     
     if not pages:
         pages.append(discord.Embed(title=title, description="No data", timestamp=now_utc()))
