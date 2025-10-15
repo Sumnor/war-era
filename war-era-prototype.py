@@ -492,7 +492,7 @@ def make_embed_for_item(idx: int, total: Optional[int], name_markup: str, avatar
         except Exception:
             pass
     if total:
-        emb.set_footer(text=f"Showing {max(1, idx - ((idx-1)//PAGE_SIZE)*PAGE_SIZE)}-{min(total, ((idx-1)//PAGE_SIZE+1)*PAGE_SIZE} of {total}")
+        emb.set_footer(text=f"Showing {max(1, idx - ((idx-1)//PAGE_SIZE)*PAGE_SIZE)}-{min(total, ((idx-1)//PAGE_SIZE+1)*PAGE_SIZE)} of {total}")
     else:
         emb.set_footer(text=endpoint)
     return emb
