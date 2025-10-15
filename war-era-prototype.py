@@ -1,4 +1,4 @@
-def process_items_list(items: List, title: str) -> Tuple[List[discord.Embed], List[str]"""
+"""
 WarEra Enhanced Bot — Comprehensive API Coverage
 All endpoints from https://api2.warera.io/docs/# with beautiful formatting
 """
