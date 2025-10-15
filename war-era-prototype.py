@@ -279,28 +279,64 @@ def link_for_entity(item: Dict[str,Any]) -> Tuple[str, Optional[str], str]:
     name = item.get("name") or item.get("title") or str(mid)
     return (safe_truncate(name,40), extract_avatar(item), ICON_USER)
 
-# ---------------- Make per-item embed ----------------
-def make_item_embed(idx:int, total:int, name_markup:str, avatar:Optional[str], value_str:str, tier:Optional[str], endpoint_title:str, icon:str=ICON_DAMAGE, color:discord.Color=None) -> discord.Embed:
-    title = f"#{idx} {icon} {name_markup}"
-    desc = f"**Value:** {value_str}"
-    if tier:
-        desc += f"\n**Tier:** {safe_truncate(str(tier),100)}"
+# ---------------- Make multi-item embed (10 per page) ----------------
+def make_multi_item_embed(items_batch: List[Tuple[int, Dict]], total: int, page_num: int, total_pages: int, title: str, icon: str) -> discord.Embed:
+    """Create an embed with up to 10 items per page"""
+    emb = discord.Embed(
+        title=f"{icon} {title}",
+        color=discord.Color.dark_gold(),
+        timestamp=now_utc()
+    )
     
-    if color is None:
-        color = discord.Color.dark_gold() if idx <= 3 else (discord.Color.gold() if idx <= 10 else discord.Color.blue())
+    desc_lines = []
+    for idx, item in items_batch:
+        name_link, avatar, item_icon = link_for_entity(item)
+        
+        # Extract value
+        val = (item.get("value") or item.get("damage") or item.get("score") or 
+               item.get("wealth") or item.get("gdp") or item.get("treasury") or 
+               item.get("population") or item.get("price") or 0)
+        
+        # Build line: #1 • [Name](link) • Value
+        line = f"**#{idx}** {item_icon} {name_link} • `{fmt_num(val)}`"
+        
+        # Add tier if exists
+        if item.get("tier"):
+            line += f" • *{item.get('tier')}*"
+        
+        desc_lines.append(line)
     
-    emb = discord.Embed(title=title, description=desc, color=color, timestamp=now_utc())
-    if avatar:
-        try: 
-            emb.set_thumbnail(url=avatar)
-        except: 
-            pass
+    emb.description = "\n".join(desc_lines)
+    emb.set_footer(text=f"Page {page_num}/{total_pages} • Total: {total} entries")
     
-    # footer: show page range
-    start = ((idx-1)//PAGE_SIZE)*PAGE_SIZE + 1
-    end = min(total, start + PAGE_SIZE - 1)
-    emb.set_footer(text=f"Showing {start}-{end} of {total} • {endpoint_title}")
     return emb
+
+def items_to_paginated_embeds(items: List[Dict], title: str, icon: str = ICON_DAMAGE) -> Tuple[List[discord.Embed], List[str]]:
+    """Convert items list to paginated embeds (10 per page)"""
+    pages = []
+    dev_json = []
+    total = len(items)
+    
+    # Group into pages of 10
+    for page_idx in range(0, total, 10):
+        batch = []
+        for idx in range(page_idx, min(page_idx + 10, total)):
+            batch.append((idx + 1, items[idx]))
+        
+        page_num = (page_idx // 10) + 1
+        total_pages = (total + 9) // 10  # Ceiling division
+        
+        emb = make_multi_item_embed(batch, total, page_num, total_pages, title, icon)
+        pages.append(emb)
+        
+        # Dev JSON for this page
+        dev_json.append(json.dumps([items[i] for i in range(page_idx, min(page_idx + 10, total))], default=str))
+    
+    if not pages:
+        pages.append(discord.Embed(title=title, description="No data available", timestamp=now_utc()))
+        dev_json.append("[]")
+    
+    return pages, dev_json
 
 # ---------------- Render endpoint to pages ----------------
 async def render_endpoint_to_pages(endpoint:str, params:Optional[Dict]=None, title_override:str=None) -> Tuple[List[discord.Embed], List[str]]:
