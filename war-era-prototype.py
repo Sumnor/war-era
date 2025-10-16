@@ -345,7 +345,15 @@ async def render_endpoint_to_pages(endpoint:str, params:Optional[Dict]=None, tit
     
     if data is None:
         return [discord.Embed(title=display_title, description="❌ Failed to fetch data", color=discord.Color.red(), timestamp=now_utc())], [json.dumps({"error":"fetch failed"})]
+    items = data["items"] if isinstance(data, dict) else data
     
+    # For each item, fetch the full details
+    for item in items:
+        cid = item.get("_id")
+        company_full = await war_api.call("company.getById", {"companyId": cid})
+        item["name"] = company_full.get("name")
+        display_titel = item["name"]
+
     # Handle dict with list inside
     if isinstance(data, dict):
         for list_key in ("items","results","data","countries","regions","battles","companies","users"):
@@ -691,21 +699,7 @@ async def topreferrals_cmd(interaction: discord.Interaction):
 
 @tree.command(name="countries", description="🌍 List all countries")
 async def countries_cmd(interaction: discord.Interaction):
-    await safe_defer(interaction)
-    data = await war_api.call("country.getAllCountries")
-    
-    countries = []
-    if isinstance(data, dict) and "countries" in data:
-        countries = data["countries"]
-    elif isinstance(data, list):
-        countries = data
-    
-    # Filter only existing countries (has regions)
-    existing = [c for c in countries if isinstance(c, dict) and c.get("regions") and len(c.get("regions", [])) > 0]
-    
-    pages, dev = items_to_paginated_embeds(existing, "🌍 All Countries (Active)", ICON_COUNTRY)
-    view = LeaderboardView(pages, dev)
-    await interaction.followup.send(embed=pages[0], view=view)
+    await send_endpoint_pages(interaction, "country.getAllCountries", None, "🌍 All Countries")
 
 @tree.command(name="country", description="🌍 Get country details")
 @app_commands.describe(country_id="Country ID or name")
@@ -747,25 +741,7 @@ async def topcountries_cmd(interaction: discord.Interaction):
 
 @tree.command(name="regions", description="🏔️ List all regions")
 async def regions_cmd(interaction: discord.Interaction):
-    await safe_defer(interaction)
-    data = await war_api.call("region.getRegionsObject")
-    
-    regions = []
-    if isinstance(data, dict):
-        # Convert object to list
-        for rid, rdata in data.items():
-            if isinstance(rdata, dict):
-                rdata["_id"] = rid
-                regions.append(rdata)
-    elif isinstance(data, list):
-        regions = data
-    
-    # Filter only existing regions (has owner country)
-    existing = [r for r in regions if isinstance(r, dict) and r.get("owner")]
-    
-    pages, dev = items_to_paginated_embeds(existing, "🏔️ All Regions (Owned)", ICON_REGION)
-    view = LeaderboardView(pages, dev)
-    await interaction.followup.send(embed=pages[0], view=view)
+    await send_endpoint_pages(interaction, "region.getRegionsObject", None, "🏔️ All Regions")
 
 @tree.command(name="region", description="🏔️ Get region details")
 @app_commands.describe(region_id="Region ID")
@@ -852,30 +828,8 @@ async def battle_cmd(interaction: discord.Interaction, battle_id: str):
 
 @tree.command(name="companies", description="🏢 List companies")
 async def companies_cmd(interaction: discord.Interaction):
-    await safe_defer(interaction)
-    data = await war_api.call("company.getCompanies", {"page": 1, "limit": 200})
     
-    items = []
-    if isinstance(data, dict) and isinstance(data.get("items"), list):
-        items = data["items"]
-    elif isinstance(data, list):
-        items = data
-    
-    # Fetch company names
-    for item in items:
-        if isinstance(item, dict):
-            cid = item.get("_id") or item.get("companyId")
-            if cid:
-                try:
-                    company_data = await war_api.call("company.getById", {"companyId": cid})
-                    if isinstance(company_data, dict):
-                        item["name"] = company_data.get("name") or company_data.get("title") or cid
-                except:
-                    pass
-    
-    pages, dev = items_to_paginated_embeds(items, "🏢 Companies", ICON_COMPANY)
-    view = LeaderboardView(pages, dev)
-    await interaction.followup.send(embed=pages[0], view=view)
+    await send_endpoint_pages(interaction, "company.getCompanies", {"page":1,"limit":50}, "🏢 Companies")
 
 @tree.command(name="company", description="🏢 Get company details")
 @app_commands.describe(company_id="Company ID")
