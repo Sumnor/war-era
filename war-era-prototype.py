@@ -483,45 +483,267 @@ async def enrich_entity_names(items: List[Any], endpoint: str) -> List[Dict]:
     
     return items
 
-# ---------------- Render endpoint to pages ----------------
-async def render_endpoint_to_pages(endpoint:str, params:Optional[Dict]=None, title_override:str=None, enrich_names:bool=True) -> Tuple[List[discord.Embed], List[str]]:
-    data = await war_api.call(endpoint, params)
-    display_title = title_override or endpoint
-    
-    if data is None:
-        return [discord.Embed(title=display_title, description="❌ Failed to fetch data", color=discord.Color.red(), timestamp=now_utc())], [json.dumps({"error":"fetch failed"})]
-    
-    if isinstance(data, dict):
-        for list_key in ("items","results","data","countries","regions","battles","companies","users"):
-            if list_key in data and isinstance(data[list_key], list):
-                items = data[list_key]
-                
-                if enrich_names:
-                    items = await enrich_entity_names(items, endpoint)
-                
-                items = await resolve_user_names_in_list(items)
-                icon = get_entity_icon(items[0] if items else {})
-                return items_to_paginated_embeds(items, display_title, icon)
-        
-        return process_single_object(data, display_title)
-    
-    if isinstance(data, list):
-        items = data
-        
-        if enrich_names:
-            items = await enrich_entity_names(items, endpoint)
-        
-        items = await resolve_user_names_in_list(items)
-        icon = get_entity_icon(items[0] if items else {})
-        return items_to_paginated_embeds(items, display_title, icon)
-    
-    return [discord.Embed(title=display_title, description=safe_truncate(str(data),1000), timestamp=now_utc())], [json.dumps(data, default=str)]
-
 # ---------------- Single Object Rendering ----------------
 def process_single_object(data: Dict, title: str) -> Tuple[List[discord.Embed], List[str]]:
     """
     Process a single object into an embed, resolving key IDs to links and formatting values.
     """
+    # Detect entity type
+    is_battle = "attacker" in data or "defender" in data or "rounds" in data
+    is_article = "content" in data and "author" in data and "category" in data
+    is_company = "itemCode" in data or "production" in data
+    is_country = "gdp" in data or "treasury" in data or "regions" in data
+    is_region = "resourceMultiplier" in data or ("countryId" in data and "name" in data)
+    is_mu = "members" in data or "commander" in data
+    is_user = "wealth" in data or "damage" in data or ("experience" in data and "level" in data)
+    
+    # Use specialized renderers for specific entity types
+    if is_battle:
+        return render_battle_embed(data, title)
+    elif is_article:
+        return render_article_embed(data, title)
+    elif is_company:
+        return render_company_embed(data, title)
+    elif is_country:
+        return render_country_embed(data, title)
+    elif is_region:
+        return render_region_embed(data, title)
+    elif is_mu:
+        return render_mu_embed(data, title)
+    elif is_user:
+        return render_user_embed(data, title)
+    
+    # Fallback to generic renderer
+    return render_generic_embed(data, title)
+
+def render_battle_embed(data: Dict, title: str) -> Tuple[List[discord.Embed], List[str]]:
+    """Render a battle entity with specialized formatting"""
+    e = discord.Embed(title=f"⚔️ {title}", timestamp=now_utc(), color=discord.Color.red())
+    
+    bid = data.get("_id") or data.get("id")
+    if bid:
+        e.url = f"{URLS['battle']}{bid}"
+    
+    # Get attacker and defender
+    attacker_id = data.get("attacker")
+    defender_id = data.get("defender")
+    
+    # Create description
+    desc_parts = []
+    if attacker_id:
+        desc_parts.append(f"🗡️ **Attacker:** [{attacker_id}]({URLS['country']}{attacker_id})")
+    if defender_id:
+        desc_parts.append(f"🛡️ **Defender:** [{defender_id}]({URLS['country']}{defender_id})")
+    
+    e.description = "\n".join(desc_parts) if desc_parts else "Battle details"
+    
+    # Add key fields
+    if data.get("isActive"):
+        e.add_field(name="Status", value="🟢 Active", inline=True)
+    else:
+        e.add_field(name="Status", value="⚫ Ended", inline=True)
+    
+    if data.get("roundsToWin"):
+        e.add_field(name="Rounds to Win", value=str(data.get("roundsToWin")), inline=True)
+    
+    if data.get("isResistance"):
+        e.add_field(name="Type", value="🔥 Resistance War", inline=True)
+    
+    if data.get("createdAt"):
+        e.add_field(name="Started", value=format_date_iso(data.get("createdAt")), inline=False)
+    
+    return [e], [json.dumps(data, default=str)]
+
+def render_article_embed(data: Dict, title: str) -> Tuple[List[discord.Embed], List[str]]:
+    """Render an article entity with specialized formatting"""
+    article_title = data.get("title") or title
+    e = discord.Embed(title=f"📰 {article_title}", timestamp=now_utc(), color=discord.Color.blue())
+    
+    aid = data.get("_id") or data.get("id")
+    if aid:
+        e.url = f"{URLS['article']}{aid}"
+        e.description = f"[🔗 Read full article on WarEra]({URLS['article']}{aid})"
+    
+    # Author
+    author_id = data.get("author")
+    if author_id and is_likely_id(author_id):
+        e.add_field(name="✍️ Author", value=f"[Profile]({URLS['user']}{author_id})", inline=True)
+    
+    # Category
+    if data.get("category"):
+        e.add_field(name="📂 Category", value=data.get("category").title(), inline=True)
+    
+    # Language
+    if data.get("language"):
+        e.add_field(name="🌐 Language", value=data.get("language").upper(), inline=True)
+    
+    # Published date
+    if data.get("publishedAt"):
+        e.add_field(name="📅 Published", value=format_date_iso(data.get("publishedAt")), inline=False)
+    
+    return [e], [json.dumps(data, default=str)]
+
+def render_company_embed(data: Dict, title: str) -> Tuple[List[discord.Embed], List[str]]:
+    """Render a company entity with specialized formatting"""
+    company_name = data.get("name") or title
+    e = discord.Embed(title=f"🏢 {company_name}", timestamp=now_utc(), color=discord.Color.gold())
+    
+    cid = data.get("_id") or data.get("id")
+    if cid:
+        e.url = f"{URLS['company']}{cid}"
+    
+    # Item produced
+    item_code = data.get("itemCode")
+    if item_code:
+        e.add_field(name="📦 Produces", value=item_code.title(), inline=True)
+    
+    # Production rate
+    if data.get("production"):
+        e.add_field(name="⚙️ Production", value=fmt_num(data.get("production")), inline=True)
+    
+    # Value
+    if data.get("estimatedValue"):
+        e.add_field(name="💰 Estimated Value", value=f"${fmt_num(data.get('estimatedValue'))}", inline=True)
+    
+    # Region
+    region_id = data.get("region")
+    if region_id and is_likely_id(region_id):
+        e.add_field(name="📍 Location", value=f"[Region]({URLS['region']}{region_id})", inline=True)
+    
+    # Worker count
+    workers = data.get("workers")
+    if isinstance(workers, list):
+        e.add_field(name="👥 Workers", value=str(len(workers)), inline=True)
+    
+    # Full status
+    if data.get("isFull") is not None:
+        status = "✅ Full" if data.get("isFull") else "🟢 Hiring"
+        e.add_field(name="Status", value=status, inline=True)
+    
+    return [e], [json.dumps(data, default=str)]
+
+def render_country_embed(data: Dict, title: str) -> Tuple[List[discord.Embed], List[str]]:
+    """Render a country entity with specialized formatting"""
+    country_name = data.get("name") or title
+    e = discord.Embed(title=f"🌍 {country_name}", timestamp=now_utc(), color=discord.Color.green())
+    
+    cid = data.get("_id") or data.get("id")
+    if cid:
+        e.url = f"{URLS['country']}{cid}"
+    
+    # Flag
+    if data.get("flag"):
+        e.set_thumbnail(url=data.get("flag"))
+    
+    # GDP
+    if data.get("gdp"):
+        e.add_field(name="💰 GDP", value=f"${fmt_num(data.get('gdp'))}", inline=True)
+    
+    # Treasury
+    if data.get("treasury"):
+        e.add_field(name="🏦 Treasury", value=f"${fmt_num(data.get('treasury'))}", inline=True)
+    
+    # Population
+    if data.get("population"):
+        e.add_field(name="👥 Population", value=fmt_num(data.get("population")), inline=True)
+    
+    # President
+    president_id = data.get("currentPresident")
+    if president_id and is_likely_id(president_id):
+        e.add_field(name="👑 President", value=f"[Profile]({URLS['user']}{president_id})", inline=True)
+    
+    # Regions
+    regions = data.get("regions")
+    if isinstance(regions, list):
+        e.add_field(name="🏔️ Regions", value=str(len(regions)), inline=True)
+    
+    return [e], [json.dumps(data, default=str)]
+
+def render_region_embed(data: Dict, title: str) -> Tuple[List[discord.Embed], List[str]]:
+    """Render a region entity with specialized formatting"""
+    region_name = data.get("name") or title
+    e = discord.Embed(title=f"🏔️ {region_name}", timestamp=now_utc(), color=discord.Color.teal())
+    
+    rid = data.get("_id") or data.get("id")
+    if rid:
+        e.url = f"{URLS['region']}{rid}"
+    
+    # Country
+    country_id = data.get("countryId")
+    if country_id and is_likely_id(country_id):
+        e.add_field(name="🌍 Country", value=f"[View]({URLS['country']}{country_id})", inline=True)
+    
+    # Resource
+    if data.get("resource"):
+        e.add_field(name="💎 Resource", value=data.get("resource").title(), inline=True)
+    
+    # Resource multiplier
+    if data.get("resourceMultiplier"):
+        e.add_field(name="📈 Multiplier", value=f"×{fmt_num(data.get('resourceMultiplier'))}", inline=True)
+    
+    return [e], [json.dumps(data, default=str)]
+
+def render_mu_embed(data: Dict, title: str) -> Tuple[List[discord.Embed], List[str]]:
+    """Render a military unit entity with specialized formatting"""
+    mu_name = data.get("name") or title
+    e = discord.Embed(title=f"🎖️ {mu_name}", timestamp=now_utc(), color=discord.Color.purple())
+    
+    mid = data.get("_id") or data.get("id")
+    if mid:
+        e.url = f"{URLS['mu']}{mid}"
+    
+    # Members
+    members = data.get("members")
+    if isinstance(members, list):
+        e.add_field(name="👥 Members", value=fmt_num(len(members)), inline=True)
+    
+    # Commander
+    commander_id = data.get("commander")
+    if commander_id and is_likely_id(commander_id):
+        e.add_field(name="👑 Commander", value=f"[Profile]({URLS['user']}{commander_id})", inline=True)
+    
+    # Country
+    country_id = data.get("countryId")
+    if country_id and is_likely_id(country_id):
+        e.add_field(name="🌍 Country", value=f"[View]({URLS['country']}{country_id})", inline=True)
+    
+    return [e], [json.dumps(data, default=str)]
+
+def render_user_embed(data: Dict, title: str) -> Tuple[List[discord.Embed], List[str]]:
+    """Render a user entity with specialized formatting"""
+    user_name = data.get("name") or data.get("username") or title
+    e = discord.Embed(title=f"👤 {user_name}", timestamp=now_utc(), color=discord.Color.blue())
+    
+    uid = data.get("_id") or data.get("id")
+    if uid:
+        e.url = f"{URLS['user']}{uid}"
+    
+    # Avatar
+    avatar = extract_avatar(data)
+    if avatar:
+        e.set_thumbnail(url=avatar)
+    
+    # Level
+    if data.get("level"):
+        e.add_field(name="⭐ Level", value=fmt_num(data.get("level")), inline=True)
+    
+    # Wealth
+    if data.get("wealth"):
+        e.add_field(name="💰 Wealth", value=f"${fmt_num(data.get('wealth'))}", inline=True)
+    
+    # Damage
+    if data.get("damage"):
+        e.add_field(name="⚔️ Damage", value=fmt_num(data.get("damage")), inline=True)
+    
+    # Country
+    country_id = data.get("countryId")
+    if country_id and is_likely_id(country_id):
+        e.add_field(name="🌍 Country", value=f"[View]({URLS['country']}{country_id})", inline=True)
+    
+    return [e], [json.dumps(data, default=str)]
+
+def render_generic_embed(data: Dict, title: str) -> Tuple[List[discord.Embed], List[str]]:
+    """Fallback generic renderer"""
     e = discord.Embed(title=title, timestamp=now_utc(), color=discord.Color.blue())
     
     name_link, avatar, icon = link_for_entity(data)
@@ -557,7 +779,7 @@ def process_single_object(data: Dict, title: str) -> Tuple[List[discord.Embed], 
                 is_id = True
                 entity_id = v
                 
-                if k in ("user", "userId", "currentPresident"):
+                if k in ("user", "userId", "currentPresident", "author", "commander"):
                     link_prefix = URLS.get("user")
                 elif k in ("company", "companyId"):
                     link_prefix = URLS.get("company")
@@ -585,7 +807,6 @@ def process_single_object(data: Dict, title: str) -> Tuple[List[discord.Embed], 
                 v_str = format_date_iso(v_str)
 
             processed_fields[k] = v_str
-        
     
     field_keys = list(processed_fields.keys())
     for k in field_keys:
@@ -593,6 +814,40 @@ def process_single_object(data: Dict, title: str) -> Tuple[List[discord.Embed], 
         e.add_field(name=field_name, value=processed_fields[k], inline=True)
     
     return [e], [json.dumps(data, default=str)]
+
+# ---------------- Render endpoint to pages ----------------
+async def render_endpoint_to_pages(endpoint:str, params:Optional[Dict]=None, title_override:str=None, enrich_names:bool=True) -> Tuple[List[discord.Embed], List[str]]:
+    data = await war_api.call(endpoint, params)
+    display_title = title_override or endpoint
+    
+    if data is None:
+        return [discord.Embed(title=display_title, description="❌ Failed to fetch data", color=discord.Color.red(), timestamp=now_utc())], [json.dumps({"error":"fetch failed"})]
+    
+    if isinstance(data, dict):
+        for list_key in ("items","results","data","countries","regions","battles","companies","users"):
+            if list_key in data and isinstance(data[list_key], list):
+                items = data[list_key]
+                
+                if enrich_names:
+                    items = await enrich_entity_names(items, endpoint)
+                
+                items = await resolve_user_names_in_list(items)
+                icon = get_entity_icon(items[0] if items else {})
+                return items_to_paginated_embeds(items, display_title, icon)
+        
+        return process_single_object(data, display_title)
+    
+    if isinstance(data, list):
+        items = data
+        
+        if enrich_names:
+            items = await enrich_entity_names(items, endpoint)
+        
+        items = await resolve_user_names_in_list(items)
+        icon = get_entity_icon(items[0] if items else {})
+        return items_to_paginated_embeds(items, display_title, icon)
+    
+    return [discord.Embed(title=display_title, description=safe_truncate(str(data),1000), timestamp=now_utc())], [json.dumps(data, default=str)]
 
 # ---------------- Leaderboard View ----------------
 class LeaderboardView(View):
@@ -708,7 +963,7 @@ async def help_cmd(interaction: discord.Interaction):
         value=(
             f"`/countries` → List all countries\n"
             f"`/country <id>` → Country details\n"
-            f"`/topcountries` → Top by GDP/Treasury\n"
+            f"`/topcountries [metric]` → Top by GDP, avg wealth, or total wealth\n"
             f"`/regions [country_id]` → List regions (optionally filter by country)\n"
             f"`/region <id>` → Region details"
         ), 
@@ -884,7 +1139,13 @@ async def country_cmd(interaction: discord.Interaction, country_id: str):
     await send_endpoint_pages(interaction, "country.getCountryById", {"countryId": country_id}, f"🌍 Country: {country_id}")
 
 @tree.command(name="topcountries", description="🏆 Top countries by GDP/Treasury")
-async def topcountries_cmd(interaction: discord.Interaction):
+@app_commands.describe(metric="Metric to rank by")
+@app_commands.choices(metric=[
+    app_commands.Choice(name="💰 GDP + Treasury", value="combined"),
+    app_commands.Choice(name="💎 Average Citizen Wealth", value="avg_wealth"),
+    app_commands.Choice(name="📊 Total Citizen Wealth", value="total_wealth"),
+])
+async def topcountries_cmd(interaction: discord.Interaction, metric: app_commands.Choice[str] = None):
     await safe_defer(interaction)
     data = await war_api.call("country.getAllCountries")
     
@@ -894,22 +1155,109 @@ async def topcountries_cmd(interaction: discord.Interaction):
     elif isinstance(data, list):
         countries = data
     
-    scored = []
-    for c in countries:
-        if isinstance(c, dict):
-            gdp = c.get("gdp") or 0
-            treasury = c.get("treasury") or 0
-            try:
-                score = float(gdp) + float(treasury)
-                new_c = c.copy()
-                new_c["value"] = score
-                scored.append(new_c)
-            except:
-                pass
+    if not metric or metric.value == "combined":
+        # Original: GDP + Treasury
+        scored = []
+        for c in countries:
+            if isinstance(c, dict):
+                gdp = c.get("gdp") or 0
+                treasury = c.get("treasury") or 0
+                try:
+                    score = float(gdp) + float(treasury)
+                    new_c = c.copy()
+                    new_c["value"] = score
+                    scored.append(new_c)
+                except:
+                    pass
+        
+        scored.sort(key=lambda x: x["value"], reverse=True)
+        pages, dev = items_to_paginated_embeds(scored[:100], "🏆 Top Countries (GDP + Treasury)", ICON_COUNTRY)
     
-    scored.sort(key=lambda x: x["value"], reverse=True)
+    elif metric.value == "avg_wealth":
+        # Average citizen wealth per country
+        scored = []
+        for c in countries:
+            if not isinstance(c, dict):
+                continue
+            
+            country_id = c.get("_id") or c.get("id")
+            if not country_id:
+                continue
+            
+            # Fetch citizens of this country from rankings
+            wealth_data = await war_api.call("ranking.getRanking", {"rankingType": "userWealth"})
+            
+            if isinstance(wealth_data, dict) and isinstance(wealth_data.get("items"), list):
+                citizens = []
+                for user in wealth_data["items"]:
+                    if isinstance(user, dict) and user.get("countryId") == country_id:
+                        wealth = user.get("value") or user.get("wealth") or 0
+                        try:
+                            citizens.append(float(wealth))
+                        except:
+                            pass
+                
+                if citizens:
+                    avg_wealth = sum(citizens) / len(citizens)
+                    new_c = c.copy()
+                    new_c["value"] = avg_wealth
+                    new_c["citizen_count"] = len(citizens)
+                    scored.append(new_c)
+        
+        scored.sort(key=lambda x: x["value"], reverse=True)
+        
+        # Custom embed for average wealth
+        items_for_display = []
+        for c in scored[:50]:
+            c_display = c.copy()
+            c_display["tier"] = f"Avg: ${fmt_num(c['value'])} ({c['citizen_count']} citizens)"
+            items_for_display.append(c_display)
+        
+        pages, dev = items_to_paginated_embeds(items_for_display, "💎 Top Countries by Avg Citizen Wealth", ICON_COUNTRY)
     
-    pages, dev = items_to_paginated_embeds(scored[:100], "Top Countries (GDP + Treasury)", ICON_COUNTRY)
+    elif metric.value == "total_wealth":
+        # Total citizen wealth per country
+        scored = []
+        for c in countries:
+            if not isinstance(c, dict):
+                continue
+            
+            country_id = c.get("_id") or c.get("id")
+            if not country_id:
+                continue
+            
+            # Fetch citizens of this country from rankings
+            wealth_data = await war_api.call("ranking.getRanking", {"rankingType": "userWealth"})
+            
+            if isinstance(wealth_data, dict) and isinstance(wealth_data.get("items"), list):
+                total_wealth = 0
+                citizen_count = 0
+                for user in wealth_data["items"]:
+                    if isinstance(user, dict) and user.get("countryId") == country_id:
+                        wealth = user.get("value") or user.get("wealth") or 0
+                        try:
+                            total_wealth += float(wealth)
+                            citizen_count += 1
+                        except:
+                            pass
+                
+                if total_wealth > 0:
+                    new_c = c.copy()
+                    new_c["value"] = total_wealth
+                    new_c["citizen_count"] = citizen_count
+                    scored.append(new_c)
+        
+        scored.sort(key=lambda x: x["value"], reverse=True)
+        
+        # Custom embed for total wealth
+        items_for_display = []
+        for c in scored[:50]:
+            c_display = c.copy()
+            c_display["tier"] = f"Total: ${fmt_num(c['value'])} ({c['citizen_count']} citizens)"
+            items_for_display.append(c_display)
+        
+        pages, dev = items_to_paginated_embeds(items_for_display, "📊 Top Countries by Total Citizen Wealth", ICON_COUNTRY)
+    
     view = LeaderboardView(pages, dev)
     await interaction.followup.send(embed=pages[0], view=view)
 
